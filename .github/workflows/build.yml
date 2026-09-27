@@ -1,17 +1,17 @@
-name: Build Android App
+name: Build Android APK
 
 on:
-  workflow_dispatch:
   push:
     branches:
       - main
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up Java 17
@@ -19,94 +19,98 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-          cache: gradle
+
+      - name: Find project ZIP
+        shell: bash
+        run: |
+          set -e
+
+          ZIP_FILE=""
+
+          for file in *fixed*.zip; do
+            if [ -f "$file" ]; then
+              ZIP_FILE="$file"
+              break
+            fi
+          done
+
+          if [ -z "$ZIP_FILE" ]; then
+            for file in *.zip; do
+              if [ -f "$file" ]; then
+                ZIP_FILE="$file"
+                break
+              fi
+            done
+          fi
+
+          if [ -z "$ZIP_FILE" ]; then
+            echo "ERROR: No project ZIP file found."
+            exit 1
+          fi
+
+          echo "Using ZIP: $ZIP_FILE"
+
+          mkdir -p extracted
+          unzip -q "$ZIP_FILE" -d extracted
+
+      - name: Locate Android project
+        shell: bash
+        run: |
+          set -e
+
+          PROJECT_DIR=$(find "$GITHUB_WORKSPACE/extracted" \
+            -type f \
+            \( -name "settings.gradle" -o -name "settings.gradle.kts" \) \
+            -print \
+            -quit | xargs -r dirname)
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "ERROR: Android Gradle project was not found."
+            exit 1
+          fi
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Android project found at:"
+          echo "$PROJECT_DIR"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.11.1'
 
-      - name: Extract Android project
+      - name: Build Debug APK
         shell: bash
         run: |
-          set -euo pipefail
-
-          ZIP_FILE="$(find . -maxdepth 1 -type f -name 'dardasha-anonymous-project-fixed*.zip' -print -quit)"
-
-          if [ -z "$ZIP_FILE" ]; then
-            ZIP_FILE="$(find . -maxdepth 1 -type f -name 'dardasha-anonymous-project*.zip' -print -quit)"
-          fi
-
-          if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: Project ZIP was not found."
-            exit 1
-          fi
-
-          rm -rf extracted
-          mkdir extracted
-
-          unzip -q "$ZIP_FILE" -d extracted
-
-          PROJECT_DIR="$(find extracted -type f -name settings.gradle.kts -print -quit | xargs -r dirname)"
-
-          if [ -z "$PROJECT_DIR" ]; then
-            echo "ERROR: settings.gradle.kts was not found."
-            exit 1
-          fi
-
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-
-          echo "Using project: $PROJECT_DIR"
-
-          find "$PROJECT_DIR" -maxdepth 4 -type f -print
-
-      - name: Fix Kotlin Compose opt-in
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          MAIN_FILE="$PROJECT_DIR/app/src/main/java/com/dardasha/anonymous/MainActivity.kt"
-
-          if [ ! -f "$MAIN_FILE" ]; then
-            echo "ERROR: MainActivity.kt was not found."
-            exit 1
-          fi
-
-          python3 - "$MAIN_FILE" <<'PY'
-
-    s = s.replace(
-        "@Composable fun DardashaApp()",
-        marker + "\n@Composable fun DardashaApp()",
-        1
-    )
-
-p.write_text(s, encoding="utf-8")
-PY
-
-      - name: Build APK
-        shell: bash
-        run: |
-          set -euo pipefail
+          set -e
 
           cd "$PROJECT_DIR"
 
-          gradle --no-daemon --stacktrace clean assembleDebug
+          echo "Building Android project..."
+          gradle assembleDebug --stacktrace
 
-      - name: Verify APK
+      - name: Find APK
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
-          APK="$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
+          APK_FILE=$(find "$PROJECT_DIR" \
+            -type f \
+            -name "*.apk" \
+            -print \
+            | head -n 1)
 
-          test -s "$APK"
+          if [ -z "$APK_FILE" ]; then
+            echo "ERROR: APK was not generated."
+            exit 1
+          fi
 
-          echo "APK created successfully:"
-          ls -lh "$APK"
+          echo "APK found:"
+          echo "$APK_FILE"
+
+          cp "$APK_FILE" "$GITHUB_WORKSPACE/dardasha-anonymous-debug.apk"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: dardasha-anonymous-apk
-          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk
-          if-no-files-found: error
+          name: dardasha-anonymous-debug
+          path: dardasha-anonymous-debug.apk
