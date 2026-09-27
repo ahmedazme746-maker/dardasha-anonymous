@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Setup Java 17
@@ -20,40 +20,79 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Find project
+      - name: Find and extract project
         shell: bash
         run: |
           set -e
 
-          PROJECT_DIR=$(find "$GITHUB_WORKSPACE" -type f \( -name "settings.gradle" -o -name "settings.gradle.kts" \) -not -path "*/.gradle/*" -print -quit | xargs -r dirname)
+          mkdir -p extracted
+
+          ZIP_FILE=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -type f -iname "*fixed*.zip" -print -quit)
+
+          if [ -z "$ZIP_FILE" ]; then
+            ZIP_FILE=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -type f -iname "*.zip" -print -quit)
+          fi
+
+          if [ -z "$ZIP_FILE" ]; then
+            echo "ERROR: No project ZIP file was found."
+            exit 1
+          fi
+
+          echo "Using project ZIP:"
+          echo "$ZIP_FILE"
+
+          unzip -q "$ZIP_FILE" -d extracted
+
+          echo "ZIP extracted successfully."
+
+      - name: Locate Android project
+        shell: bash
+        run: |
+          set -e
+
+          PROJECT_DIR=$(find "$GITHUB_WORKSPACE/extracted" \
+            -type f \
+            \( -name "settings.gradle" -o -name "settings.gradle.kts" \) \
+            -not -path "*/.gradle/*" \
+            -print -quit)
 
           if [ -z "$PROJECT_DIR" ]; then
-            echo "ERROR: Android Gradle project not found."
+            echo "ERROR: settings.gradle or settings.gradle.kts was not found."
+            echo "Extracted files:"
+            find "$GITHUB_WORKSPACE/extracted" -maxdepth 4 -type f | head -100
             exit 1
           fi
 
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "Project: $PROJECT_DIR"
+          PROJECT_DIR=$(dirname "$PROJECT_DIR")
 
-      - name: Fix Kotlin experimental Material API
+          echo "Android project found:"
+          echo "$PROJECT_DIR"
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+      - name: Fix Kotlin Material3 experimental API
         shell: bash
         run: |
           set -e
 
-          MAIN_FILE=$(find "$PROJECT_DIR/app/src/main" -type f -name "MainActivity.kt" -print -quit)
+          MAIN_FILE=$(find "$PROJECT_DIR/app/src/main" \
+            -type f \
+            -name "MainActivity.kt" \
+            -print -quit)
 
           if [ -z "$MAIN_FILE" ]; then
-            echo "ERROR: MainActivity.kt not found."
+            echo "ERROR: MainActivity.kt was not found."
             exit 1
           fi
 
-          echo "MainActivity: $MAIN_FILE"
+          echo "MainActivity found:"
+          echo "$MAIN_FILE"
 
-          if ! grep -q "ExperimentalMaterial3Api" "$MAIN_FILE"; then
-            sed -i '/@Composable fun DardashaApp()/i @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)' "$MAIN_FILE"
+          if ! grep -q "androidx.compose.material3.ExperimentalMaterial3Api" "$MAIN_FILE"; then
+            sed -i '1i@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)' "$MAIN_FILE"
           fi
 
-          echo "Kotlin Material3 experimental API fix applied."
+          echo "Experimental Material3 API opt-in applied."
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -67,21 +106,26 @@ jobs:
 
           cd "$PROJECT_DIR"
 
+          echo "Starting Gradle build..."
+
           gradle --no-daemon assembleDebug --stacktrace
 
-      - name: Find APK
+      - name: Locate generated APK
         shell: bash
         run: |
           set -e
 
-          APK_FILE=$(find "$PROJECT_DIR" -type f -name "*.apk" -print -quit)
+          APK_FILE=$(find "$PROJECT_DIR" \
+            -type f \
+            -name "*.apk" \
+            -print -quit)
 
           if [ -z "$APK_FILE" ]; then
             echo "ERROR: APK was not generated."
             exit 1
           fi
 
-          echo "APK generated:"
+          echo "APK generated successfully:"
           echo "$APK_FILE"
 
           cp "$APK_FILE" "$GITHUB_WORKSPACE/dardasha-anonymous-debug.apk"
