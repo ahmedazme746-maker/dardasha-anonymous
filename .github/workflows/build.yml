@@ -14,38 +14,29 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Extract project
-        run: |
-          mkdir -p build_project
-          unzip -q dardasha-anonymous-project.zip -d build_project
-          echo "Project extracted:"
-          find build_project -maxdepth 3 -type f | head -100
-
       - name: Set up Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
 
-      - name: Build
+      - name: Extract project
         run: |
-          PROJECT_DIR=$(find build_project -name gradlew -type f | head -1 | xargs -r dirname)
+          unzip -q dardasha-anonymous-project.zip
+          ls -la dardasha-anonymous
 
-          if [ -z "$PROJECT_DIR" ]; then
-            echo "ERROR: gradlew was not found."
-            echo "The uploaded project structure needs to be checked."
-            exit 1
-          fi
-
-          cd "$PROJECT_DIR"
-          chmod +x gradlew
-          ./gradlew assembleDebug --stacktrace
+      - name: Build APK
+        run: |
+          cd dardasha-anonymous
+          gradle assembleDebug --stacktrace
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: dardasha-anonymous-debug
-          path: '**/build/outputs/apk/debug/*.apk'
+          name: dardasha-anonymous-apk
+          path: dardasha-anonymous/app/build/outputs/apk/debug/app-debug.apk
