@@ -14,60 +14,107 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Java
+      - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
+          cache: gradle
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.11.1'
 
-      - name: Extract project
+      - name: Extract Android project
+        shell: bash
         run: |
-          rm -rf build-project
-          mkdir -p build-project
-          unzip -q dardasha-anonymous-project-fixed.zip -d build-project
-          find build-project -maxdepth 3 -type f | sort
+          set -euo pipefail
 
-      - name: Prepare project
-        run: |
-          PROJECT_DIR=$(find build-project -name settings.gradle.kts -type f -print -quit)
-          if [ -z "$PROJECT_DIR" ]; then
-            echo "ERROR: settings.gradle.kts not found"
+          ZIP_FILE="$(find . -maxdepth 1 -type f -name 'dardasha-anonymous-project-fixed*.zip' -print -quit)"
+
+          if [ -z "$ZIP_FILE" ]; then
+            ZIP_FILE="$(find . -maxdepth 1 -type f -name 'dardasha-anonymous-project*.zip' -print -quit)"
+          fi
+
+          if [ -z "$ZIP_FILE" ]; then
+            echo "ERROR: Project ZIP was not found."
             exit 1
           fi
 
-          PROJECT_ROOT=$(dirname "$PROJECT_DIR")
-          echo "Project root: $PROJECT_ROOT"
+          rm -rf extracted
+          mkdir extracted
 
-          if [ "$PROJECT_ROOT" != "build-project" ]; then
-            rm -rf build-project/source
-            mkdir -p build-project/source
-            cp -R "$PROJECT_ROOT"/. build-project/source/
-            rm -rf "$PROJECT_ROOT"
-            mv build-project/source/* build-project/source/.[!.]* build-project/ 2>/dev/null || true
-            rm -rf build-project/source
+          unzip -q "$ZIP_FILE" -d extracted
+
+          PROJECT_DIR="$(find extracted -type f -name settings.gradle.kts -print -quit | xargs -r dirname)"
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "ERROR: settings.gradle.kts was not found."
+            exit 1
           fi
 
-          test -f build-project/settings.gradle.kts
-          test -f build-project/app/build.gradle.kts
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          echo "Using project: $PROJECT_DIR"
+
+          find "$PROJECT_DIR" -maxdepth 4 -type f -print
+
+      - name: Fix Kotlin Compose opt-in
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          MAIN_FILE="$PROJECT_DIR/app/src/main/java/com/dardasha/anonymous/MainActivity.kt"
+
+          if [ ! -f "$MAIN_FILE" ]; then
+            echo "ERROR: MainActivity.kt was not found."
+            exit 1
+          fi
+
+          python3 - "$MAIN_FILE" <<'PY'
+import sys
+from pathlib import Path
+
+p = Path(sys.argv[1])
+s = p.read_text(encoding="utf-8")
+
+marker = "@OptIn(ExperimentalMaterial3Api::class)"
+
+if marker not in s:
+    s = s.replace(
+        "@Composable fun DardashaApp()",
+        marker + "\n@Composable fun DardashaApp()",
+        1
+    )
+
+p.write_text(s, encoding="utf-8")
+PY
 
       - name: Build APK
+        shell: bash
         run: |
-          cd build-project
-          gradle clean assembleDebug --stacktrace
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          gradle --no-daemon --stacktrace clean assembleDebug
 
       - name: Verify APK
+        shell: bash
         run: |
-          test -f build-project/app/build/outputs/apk/debug/app-debug.apk
-          ls -lh build-project/app/build/outputs/apk/debug/app-debug.apk
+          set -euo pipefail
+
+          APK="$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
+
+          test -s "$APK"
+
+          echo "APK created successfully:"
+          ls -lh "$APK"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: dardasha-anonymous-apk
-          path: build-project/app/build/outputs/apk/debug/app-debug.apk
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
