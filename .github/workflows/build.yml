@@ -73,15 +73,7 @@ jobs:
           fi
 
           python3 - "$MAIN_FILE" <<'PY'
-import sys
-from pathlib import Path
 
-p = Path(sys.argv[1])
-s = p.read_text(encoding="utf-8")
-
-marker = "@OptIn(ExperimentalMaterial3Api::class)"
-
-if marker not in s:
     s = s.replace(
         "@Composable fun DardashaApp()",
         marker + "\n@Composable fun DardashaApp()",
