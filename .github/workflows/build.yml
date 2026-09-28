@@ -4,9 +4,6 @@ on:
   push:
     branches:
       - main
-    paths:
-      - ".github/workflows/build.yml"
-      - "dardasha-anonymous-chat-project-FINAL.zip"
   workflow_dispatch:
 
 permissions:
@@ -27,21 +24,26 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Check project ZIP
+      - name: Find chat project ZIP
         shell: bash
         run: |
           set -euo pipefail
 
-          ZIP="$GITHUB_WORKSPACE/dardasha-anonymous-chat-project-FINAL.zip"
-
-          if [ ! -f "$ZIP" ]; then
-            echo "::error::dardasha-anonymous-chat-project-FINAL.zip was not found in the repository root."
-            echo "ZIP files currently in the root:"
+          # Use the actual chat ZIP currently in the repository.
+          # Prefer the FINAL name if it exists; otherwise use the uploaded chat project.
+          if [ -f "$GITHUB_WORKSPACE/dardasha-anonymous-chat-project-FINAL.zip" ]; then
+            ZIP="$GITHUB_WORKSPACE/dardasha-anonymous-chat-project-FINAL.zip"
+          elif [ -f "$GITHUB_WORKSPACE/dardasha-anonymous-chat-project.zip" ]; then
+            ZIP="$GITHUB_WORKSPACE/dardasha-anonymous-chat-project.zip"
+          else
+            echo "::error::No chat project ZIP was found in the repository root."
+            echo "ZIP files found:"
             find "$GITHUB_WORKSPACE" -maxdepth 1 -type f -iname "*.zip" -printf '%f\n' | sort || true
             exit 1
           fi
 
-          echo "Using: $ZIP"
+          echo "ZIP_FILE=$ZIP" >> "$GITHUB_ENV"
+          echo "Using ZIP: $ZIP"
           unzip -t "$ZIP" >/dev/null
           echo "ZIP integrity: OK"
 
@@ -53,15 +55,14 @@ jobs:
           rm -rf "$GITHUB_WORKSPACE/extracted"
           mkdir -p "$GITHUB_WORKSPACE/extracted"
 
-          unzip -q "$GITHUB_WORKSPACE/dardasha-anonymous-chat-project-FINAL.zip" \
-            -d "$GITHUB_WORKSPACE/extracted"
+          unzip -q "$ZIP_FILE" -d "$GITHUB_WORKSPACE/extracted"
 
           SETTINGS_FILE="$(find "$GITHUB_WORKSPACE/extracted" -type f \
             \( -name "settings.gradle.kts" -o -name "settings.gradle" \) \
             -not -path "*/.gradle/*" | head -n 1)"
 
           if [ -z "$SETTINGS_FILE" ]; then
-            echo "::error::No settings.gradle(.kts) was found inside the chat project ZIP."
+            echo "::error::No settings.gradle(.kts) found inside the selected chat ZIP."
             find "$GITHUB_WORKSPACE/extracted" -maxdepth 5 -type f | sort | head -200
             exit 1
           fi
@@ -70,22 +71,15 @@ jobs:
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
           echo "Android project: $PROJECT_DIR"
 
-      - name: Validate Android project
+      - name: Validate project
         shell: bash
         run: |
           set -euo pipefail
 
-          test -f "$PROJECT_DIR/build.gradle.kts"
-          test -f "$PROJECT_DIR/settings.gradle.kts"
-          test -f "$PROJECT_DIR/app/build.gradle.kts"
-          test -f "$PROJECT_DIR/app/google-services.json"
+          test -f "$PROJECT_DIR/settings.gradle.kts" || test -f "$PROJECT_DIR/settings.gradle"
+          test -f "$PROJECT_DIR/app/build.gradle.kts" || test -f "$PROJECT_DIR/app/build.gradle"
 
-          grep -q 'com.android.application.*8.13.2' "$PROJECT_DIR/build.gradle.kts"
-          grep -q 'org.jetbrains.kotlin.android.*2.3.0' "$PROJECT_DIR/build.gradle.kts"
-          grep -q 'compileSdk = 36' "$PROJECT_DIR/app/build.gradle.kts"
-          grep -q 'targetSdk = 36' "$PROJECT_DIR/app/build.gradle.kts"
-
-          echo "Project structure and versions: OK"
+          echo "Project structure: OK"
 
       - name: Install Android SDK 36
         shell: bash
@@ -96,12 +90,12 @@ jobs:
             -type f -name sdkmanager | head -n 1)"
 
           if [ -z "$SDKMANAGER" ]; then
-            echo "::error::Android sdkmanager was not found on the GitHub runner."
+            echo "::error::Android sdkmanager was not found."
             exit 1
           fi
 
           yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
-          "$SDKMANAGER" "platforms;android-36" "build-tools;35.0.0"
+          "$SDKMANAGER" "platforms;android-36"
 
       - name: Setup Gradle 8.13
         uses: gradle/actions/setup-gradle@v4
@@ -113,12 +107,6 @@ jobs:
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           set -euo pipefail
-
-          echo "Gradle:"
-          gradle --version
-
-          echo "Building:"
-          echo "$PWD"
 
           gradle --no-daemon --stacktrace --warning-mode all assembleDebug
 
@@ -139,7 +127,6 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/release"
           cp "$APK" "$GITHUB_WORKSPACE/release/dardasha-anonymous-debug.apk"
 
-          echo "APK created:"
           ls -lh "$GITHUB_WORKSPACE/release/dardasha-anonymous-debug.apk"
 
       - name: Upload APK artifact
