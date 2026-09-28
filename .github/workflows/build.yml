@@ -20,29 +20,26 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Find and extract project
+      - name: Find and extract Firebase project
         shell: bash
         run: |
           set -e
 
           mkdir -p extracted
 
-          ZIP_FILE=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -type f -iname "*fixed*.zip" -print -quit)
+          ZIP_FILE=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -type f -iname "*firebase*.zip" -print -quit)
 
           if [ -z "$ZIP_FILE" ]; then
-            ZIP_FILE=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -type f -iname "*.zip" -print -quit)
-          fi
-
-          if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: No project ZIP file was found."
+            echo "ERROR: Firebase project ZIP was not found."
+            echo "ZIP files in repository:"
+            find "$GITHUB_WORKSPACE" -maxdepth 1 -type f -iname "*.zip" -print
             exit 1
           fi
 
-          echo "Using project ZIP:"
+          echo "Using Firebase project ZIP:"
           echo "$ZIP_FILE"
 
           unzip -q "$ZIP_FILE" -d extracted
-
           echo "ZIP extracted successfully."
 
       - name: Locate Android project
@@ -50,25 +47,51 @@ jobs:
         run: |
           set -e
 
-          PROJECT_DIR=$(find "$GITHUB_WORKSPACE/extracted" \
+          SETTINGS_FILE=$(find "$GITHUB_WORKSPACE/extracted" \
             -type f \
             \( -name "settings.gradle" -o -name "settings.gradle.kts" \) \
             -not -path "*/.gradle/*" \
             -print -quit)
 
-          if [ -z "$PROJECT_DIR" ]; then
+          if [ -z "$SETTINGS_FILE" ]; then
             echo "ERROR: settings.gradle or settings.gradle.kts was not found."
-            echo "Extracted files:"
-            find "$GITHUB_WORKSPACE/extracted" -maxdepth 4 -type f | head -100
             exit 1
           fi
 
-          PROJECT_DIR=$(dirname "$PROJECT_DIR")
+          PROJECT_DIR=$(dirname "$SETTINGS_FILE")
 
           echo "Android project found:"
           echo "$PROJECT_DIR"
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+      - name: Prepare compatible Gradle plugin versions
+        shell: bash
+        run: |
+          set -e
+
+          cat > "$GITHUB_WORKSPACE/ci-version-fix.init.gradle" <<'EOF'
+          settingsEvaluated { settings ->
+              settings.pluginManagement {
+                  resolutionStrategy {
+                      eachPlugin {
+                          if (requested.id.id.startsWith("org.jetbrains.kotlin.")) {
+                              useVersion("2.3.0")
+                          }
+
+                          if (requested.id.id == "com.android.application" ||
+                              requested.id.id == "com.android.library") {
+                              useVersion("8.13.0")
+                          }
+                      }
+                  }
+              }
+          }
+          EOF
+
+          echo "CI plugin compatibility rules prepared:"
+          echo "Kotlin -> 2.3.0"
+          echo "Android Gradle Plugin -> 8.13.0"
 
       - name: Fix Kotlin Material3 experimental API
         shell: bash
@@ -97,18 +120,24 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.11.1'
+          gradle-version: '8.13'
 
       - name: Build Debug APK
         shell: bash
         run: |
           set -e
-
           cd "$PROJECT_DIR"
 
           echo "Starting Gradle build..."
+          echo "Gradle: 8.13"
+          echo "Android Gradle Plugin: 8.13.0"
+          echo "Kotlin: 2.3.0"
 
-          gradle --no-daemon assembleDebug --stacktrace
+          gradle \
+            --no-daemon \
+            --init-script "$GITHUB_WORKSPACE/ci-version-fix.init.gradle" \
+            assembleDebug \
+            --stacktrace
 
       - name: Locate generated APK
         shell: bash
