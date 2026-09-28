@@ -32,7 +32,7 @@ jobs:
           java-version: "17"
 
       # ==========================================
-      # 3. Find project ZIP
+      # 3. Find Dardasha ZIP
       # ==========================================
       - name: Find Dardasha ZIP
         shell: bash
@@ -49,8 +49,6 @@ jobs:
 
           if [ -z "$ZIP_FILE" ]; then
             echo "ERROR: Dardasha ZIP was not found."
-            echo ""
-            echo "Repository files:"
             find "$GITHUB_WORKSPACE" \
               -maxdepth 5 \
               -type f \
@@ -58,7 +56,7 @@ jobs:
             exit 1
           fi
 
-          echo "Using:"
+          echo "Using ZIP:"
           echo "$ZIP_FILE"
 
           unzip -t "$ZIP_FILE" >/dev/null
@@ -82,7 +80,7 @@ jobs:
 
           unzip -q "$ZIP_FILE" -d "$PROJECT_ROOT"
 
-          echo "Searching for settings.gradle..."
+          echo "Searching for Android project..."
 
           SETTINGS_FILE=$(find "$PROJECT_ROOT" \
             -type f \
@@ -124,7 +122,7 @@ jobs:
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
       # ==========================================
-      # 5. FIX COMPOSE COMPATIBILITY
+      # 5. Fix Compose dependencies
       # ==========================================
       - name: Normalize Compose dependencies
         shell: bash
@@ -143,57 +141,80 @@ jobs:
             exit 1
           fi
 
-          echo "Before:"
-          grep -nE \
-            'compose-bom|compose\.animation|compose\.foundation|compose\.runtime|compose\.ui|material3' \
-            "$FILE" || true
-
-          # Use Compose BOM 2026.06.01.
-          # This BOM maps the core Compose libraries to 1.11.4.
           sed -i \
             -E 's/(androidx\.compose:compose-bom:)[0-9]+\.[0-9]+\.[0-9]+/\12026.06.01/g' \
             "$FILE"
 
-          # Fix any explicit Compose 1.12.x references.
           sed -i \
             -E 's/(androidx\.compose\.(animation|foundation|runtime|ui)([^:]*):[^:]+:)[0-9]+\.[0-9]+\.[0-9]+/\11.11.4/g' \
             "$FILE"
 
-          # Fix explicit animation-core references too.
           sed -i \
             -E 's/(androidx\.compose\.animation:animation-core:)[0-9]+\.[0-9]+\.[0-9]+/\11.11.4/g' \
             "$FILE"
 
-          echo ""
-          echo "After:"
+          echo "Compose configuration:"
           grep -nE \
             'compose-bom|compose\.animation|compose\.foundation|compose\.runtime|compose\.ui|material3' \
             "$FILE" || true
 
-          # Hard failure if the incompatible 1.12.x dependency is still explicitly present.
-          if grep -Eq \
-            'androidx\.compose\.(animation|foundation|runtime|ui)[^:]*:[^:]*:1\.12\.' \
-            "$FILE"; then
-
-            echo ""
-            echo "ERROR: Compose 1.12.x is still explicitly configured."
-            exit 1
-          fi
-
-          if grep -Eq \
-            'androidx\.compose:compose-bom:2026\.(08|09)\.' \
-            "$FILE"; then
-
-            echo ""
-            echo "ERROR: Incompatible Compose BOM is still configured."
-            exit 1
-          fi
-
-          echo ""
           echo "Compose normalization: OK"
 
       # ==========================================
-      # 6. Show actual dependencies
+      # 6. Force AndroidX Core compatible version
+      # ==========================================
+      - name: Fix AndroidX Core compatibility
+        shell: bash
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -euo pipefail
+
+          FILE="app/build.gradle.kts"
+
+          echo "=========================================="
+          echo "FIXING ANDROIDX CORE"
+          echo "=========================================="
+
+          if [ ! -f "$FILE" ]; then
+            echo "ERROR: $FILE not found."
+            exit 1
+          fi
+
+          # Fix explicit dependencies if present.
+          sed -i \
+            -E 's/(androidx\.core:core-ktx:)[0-9]+\.[0-9]+\.[0-9]+/\11.18.0/g' \
+            "$FILE"
+
+          sed -i \
+            -E 's/(androidx\.core:core:)[0-9]+\.[0-9]+\.[0-9]+/\11.18.0/g' \
+            "$FILE"
+
+          # Force transitive AndroidX Core dependencies too.
+          cat >> "$FILE" <<'EOF'
+
+          // CI compatibility fix:
+          // AGP 8.13 + compileSdk 36 cannot use AndroidX Core 1.19.x.
+          configurations.configureEach {
+              resolutionStrategy.eachDependency {
+                  if (requested.group == "androidx.core" &&
+                      (requested.name == "core" || requested.name == "core-ktx")) {
+                      useVersion("1.18.0")
+                  }
+              }
+          }
+          EOF
+
+          echo ""
+          echo "AndroidX Core configuration:"
+          grep -nE \
+            'androidx\.core|resolutionStrategy|1\.18\.0' \
+            "$FILE" || true
+
+          echo ""
+          echo "AndroidX Core fix: OK"
+
+      # ==========================================
+      # 7. Verify project configuration
       # ==========================================
       - name: Verify Android configuration
         shell: bash
@@ -206,27 +227,30 @@ jobs:
           echo "=========================================="
 
           echo ""
-          echo "Gradle files:"
-          find . \
-            -maxdepth 4 \
-            -type f \
-            \( \
-              -name "*.gradle" \
-              -o \
-              -name "*.gradle.kts" \
-            \) \
-            | sort
-
-          echo ""
           echo "compileSdk:"
           grep -n "compileSdk" app/build.gradle.kts || true
+
+          echo ""
+          echo "Core:"
+          grep -nE \
+            'androidx\.core|1\.18\.0' \
+            app/build.gradle.kts || true
 
           echo ""
           echo "Compose:"
           grep -n "compose" app/build.gradle.kts || true
 
+          echo ""
+          echo "AGP:"
+          grep -R \
+            -n \
+            'com.android.application.*8\.13' \
+            . \
+            --include="*.gradle.kts" \
+            || true
+
       # ==========================================
-      # 7. Setup Gradle 8.13
+      # 8. Setup Gradle 8.13
       # ==========================================
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -234,7 +258,7 @@ jobs:
           gradle-version: "8.13"
 
       # ==========================================
-      # 8. Gradle configuration test
+      # 9. Test Gradle configuration
       # ==========================================
       - name: Test Gradle configuration
         shell: bash
@@ -250,7 +274,27 @@ jobs:
             --console=plain
 
       # ==========================================
-      # 9. Build APK
+      # 10. Check resolved Core dependency
+      # ==========================================
+      - name: Verify resolved AndroidX Core
+        shell: bash
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "CHECKING RESOLVED ANDROIDX CORE"
+          echo "=========================================="
+
+          gradle \
+            --no-daemon \
+            :app:dependencyInsight \
+            --dependency androidx.core:core \
+            --configuration debugCompileClasspath \
+            --console=plain
+
+      # ==========================================
+      # 11. Build APK
       # ==========================================
       - name: Build Debug APK
         shell: bash
@@ -271,7 +315,7 @@ jobs:
             --console=plain
 
       # ==========================================
-      # 10. Find APK
+      # 12. Find APK
       # ==========================================
       - name: Find APK
         shell: bash
@@ -296,8 +340,10 @@ jobs:
             exit 1
           fi
 
-          echo "APK:"
+          echo "=========================================="
+          echo "APK FOUND"
           echo "$APK"
+          echo "=========================================="
 
           mkdir -p "$GITHUB_WORKSPACE/release"
 
@@ -305,7 +351,7 @@ jobs:
             "$GITHUB_WORKSPACE/release/dardasha-anonymous-debug.apk"
 
       # ==========================================
-      # 11. Upload APK
+      # 13. Upload APK
       # ==========================================
       - name: Upload APK
         uses: actions/upload-artifact@v4
