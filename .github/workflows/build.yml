@@ -1,4 +1,4 @@
-name: Build Dardasha Anonymous APK
+name: Build Dardasha APK
 
 on:
   push:
@@ -15,19 +15,31 @@ jobs:
     timeout-minutes: 30
 
     steps:
+
+      # ==========================================
+      # 1. Checkout
+      # ==========================================
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # ==========================================
+      # 2. Java 17
+      # ==========================================
       - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
+      # ==========================================
+      # 3. Find project ZIP
+      # ==========================================
       - name: Find Dardasha ZIP
         shell: bash
         run: |
           set -euo pipefail
+
+          echo "Searching for Dardasha ZIP..."
 
           ZIP_FILE=$(find "$GITHUB_WORKSPACE" \
             -type f \
@@ -36,17 +48,28 @@ jobs:
             -print -quit || true)
 
           if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: Dardasha ZIP not found."
+            echo "ERROR: Dardasha ZIP was not found."
+            echo ""
+            echo "Repository files:"
+            find "$GITHUB_WORKSPACE" \
+              -maxdepth 5 \
+              -type f \
+              | sort
             exit 1
           fi
 
-          echo "Using ZIP:"
+          echo "Using:"
           echo "$ZIP_FILE"
 
           unzip -t "$ZIP_FILE" >/dev/null
 
+          echo "ZIP integrity: OK"
+
           echo "ZIP_FILE=$ZIP_FILE" >> "$GITHUB_ENV"
 
+      # ==========================================
+      # 4. Extract Android project
+      # ==========================================
       - name: Extract Android project
         shell: bash
         run: |
@@ -59,6 +82,8 @@ jobs:
 
           unzip -q "$ZIP_FILE" -d "$PROJECT_ROOT"
 
+          echo "Searching for settings.gradle..."
+
           SETTINGS_FILE=$(find "$PROJECT_ROOT" \
             -type f \
             \( \
@@ -70,20 +95,27 @@ jobs:
             -print -quit || true)
 
           if [ -z "$SETTINGS_FILE" ]; then
-            echo "ERROR: Android project not found inside ZIP."
-            find "$PROJECT_ROOT" -maxdepth 8 -type f | sort
+            echo "ERROR: settings.gradle(.kts) not found."
+
+            find "$PROJECT_ROOT" \
+              -maxdepth 8 \
+              -type f \
+              | sort
+
             exit 1
           fi
 
           PROJECT_DIR=$(dirname "$SETTINGS_FILE")
 
-          echo "Android project:"
+          echo "=========================================="
+          echo "ANDROID PROJECT"
           echo "$PROJECT_DIR"
+          echo "=========================================="
 
           if [ -f "$PROJECT_DIR/app/build.gradle.kts" ]; then
-            echo "Gradle file found."
+            echo "Found app/build.gradle.kts"
           elif [ -f "$PROJECT_DIR/app/build.gradle" ]; then
-            echo "Gradle file found."
+            echo "Found app/build.gradle"
           else
             echo "ERROR: app Gradle file not found."
             exit 1
@@ -91,40 +123,156 @@ jobs:
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.13"
-
-      - name: Check project
+      # ==========================================
+      # 5. FIX COMPOSE COMPATIBILITY
+      # ==========================================
+      - name: Normalize Compose dependencies
         shell: bash
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           set -euo pipefail
 
-          echo "Project:"
-          pwd
+          FILE="app/build.gradle.kts"
 
-          echo "Checking Gradle..."
+          echo "=========================================="
+          echo "NORMALIZING COMPOSE"
+          echo "=========================================="
+
+          if [ ! -f "$FILE" ]; then
+            echo "ERROR: $FILE not found."
+            exit 1
+          fi
+
+          echo "Before:"
+          grep -nE \
+            'compose-bom|compose\.animation|compose\.foundation|compose\.runtime|compose\.ui|material3' \
+            "$FILE" || true
+
+          # Use Compose BOM 2026.06.01.
+          # This BOM maps the core Compose libraries to 1.11.4.
+          sed -i \
+            -E 's/(androidx\.compose:compose-bom:)[0-9]+\.[0-9]+\.[0-9]+/\12026.06.01/g' \
+            "$FILE"
+
+          # Fix any explicit Compose 1.12.x references.
+          sed -i \
+            -E 's/(androidx\.compose\.(animation|foundation|runtime|ui)([^:]*):[^:]+:)[0-9]+\.[0-9]+\.[0-9]+/\11.11.4/g' \
+            "$FILE"
+
+          # Fix explicit animation-core references too.
+          sed -i \
+            -E 's/(androidx\.compose\.animation:animation-core:)[0-9]+\.[0-9]+\.[0-9]+/\11.11.4/g' \
+            "$FILE"
+
+          echo ""
+          echo "After:"
+          grep -nE \
+            'compose-bom|compose\.animation|compose\.foundation|compose\.runtime|compose\.ui|material3' \
+            "$FILE" || true
+
+          # Hard failure if the incompatible 1.12.x dependency is still explicitly present.
+          if grep -Eq \
+            'androidx\.compose\.(animation|foundation|runtime|ui)[^:]*:[^:]*:1\.12\.' \
+            "$FILE"; then
+
+            echo ""
+            echo "ERROR: Compose 1.12.x is still explicitly configured."
+            exit 1
+          fi
+
+          if grep -Eq \
+            'androidx\.compose:compose-bom:2026\.(08|09)\.' \
+            "$FILE"; then
+
+            echo ""
+            echo "ERROR: Incompatible Compose BOM is still configured."
+            exit 1
+          fi
+
+          echo ""
+          echo "Compose normalization: OK"
+
+      # ==========================================
+      # 6. Show actual dependencies
+      # ==========================================
+      - name: Verify Android configuration
+        shell: bash
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "PROJECT CONFIGURATION"
+          echo "=========================================="
+
+          echo ""
+          echo "Gradle files:"
+          find . \
+            -maxdepth 4 \
+            -type f \
+            \( \
+              -name "*.gradle" \
+              -o \
+              -name "*.gradle.kts" \
+            \) \
+            | sort
+
+          echo ""
+          echo "compileSdk:"
+          grep -n "compileSdk" app/build.gradle.kts || true
+
+          echo ""
+          echo "Compose:"
+          grep -n "compose" app/build.gradle.kts || true
+
+      # ==========================================
+      # 7. Setup Gradle 8.13
+      # ==========================================
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.13"
+
+      # ==========================================
+      # 8. Gradle configuration test
+      # ==========================================
+      - name: Test Gradle configuration
+        shell: bash
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -euo pipefail
+
           gradle \
             --no-daemon \
             --stacktrace \
+            --warning-mode all \
             tasks \
             --console=plain
 
+      # ==========================================
+      # 9. Build APK
+      # ==========================================
       - name: Build Debug APK
         shell: bash
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           set -euo pipefail
 
+          echo "=========================================="
+          echo "BUILDING DARDASHA APK"
+          echo "=========================================="
+
           gradle \
             --no-daemon \
             --stacktrace \
+            --warning-mode all \
             clean \
             :app:assembleDebug \
             --console=plain
 
+      # ==========================================
+      # 10. Find APK
+      # ==========================================
       - name: Find APK
         shell: bash
         run: |
@@ -137,14 +285,28 @@ jobs:
 
           if [ -z "$APK" ]; then
             echo "ERROR: APK was not generated."
+
+            echo ""
+            echo "Build outputs:"
+            find "$PROJECT_DIR/app/build/outputs" \
+              -maxdepth 10 \
+              -type f \
+              | sort || true
+
             exit 1
           fi
+
+          echo "APK:"
+          echo "$APK"
 
           mkdir -p "$GITHUB_WORKSPACE/release"
 
           cp "$APK" \
             "$GITHUB_WORKSPACE/release/dardasha-anonymous-debug.apk"
 
+      # ==========================================
+      # 11. Upload APK
+      # ==========================================
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
