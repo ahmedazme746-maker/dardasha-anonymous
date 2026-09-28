@@ -1,201 +1,789 @@
-name: Build Dardasha Anonymous Chat
+@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 
-"on":
-  push:
-    branches:
-      - main
-  workflow_dispatch:
+package com.dardasha.anonymous
 
-permissions:
-  contents: read
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.database.DataSnapshot
+import com.google.firebase.database.DatabaseError
+import com.google.firebase.database.FirebaseDatabase
+import com.google.firebase.database.ValueEventListener
+import com.google.firebase.database.DatabaseReference
+import com.google.firebase.database.ServerValue
+import java.util.UUID
 
-jobs:
-  build:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
+private const val DB_URL =
+    "https://dardasha-anonymous-default-rtdb.firebaseio.com"
 
-    steps:
+private data class ChatMessage(
+    val id: String = "",
+    val senderId: String = "",
+    val text: String = "",
+    val timestamp: Long = 0L
+)
 
-      - name: Checkout repository
-        uses: actions/checkout@v4
+private enum class Screen {
+    HOME,
+    MATCHING,
+    CHAT
+}
 
-      - name: Setup Java 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
+class MainActivity : ComponentActivity() {
 
-      - name: Find chat project
-        shell: bash
-        run: |
-          set -euo pipefail
+    private val auth: FirebaseAuth by lazy {
+        FirebaseAuth.getInstance()
+    }
 
-          ZIP="$GITHUB_WORKSPACE/dardasha-anonymous-chat-project.zip"
+    private val database: FirebaseDatabase by lazy {
+        FirebaseDatabase.getInstance(DB_URL)
+    }
 
-          if [ ! -f "$ZIP" ]; then
-            echo "::error::dardasha-anonymous-chat-project.zip not found."
-            find "$GITHUB_WORKSPACE" -maxdepth 2 -type f -name "*.zip" -print
-            exit 1
-          fi
+    private val root: DatabaseReference by lazy {
+        database.reference
+    }
 
-          unzip -t "$ZIP" >/dev/null
+    private var waitingRef: DatabaseReference? = null
+    private var matchingListener: ValueEventListener? = null
 
-          echo "ZIP_FILE=$ZIP" >> "$GITHUB_ENV"
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
 
-          echo "Project ZIP found and verified."
+        setContent {
+            MaterialTheme {
+                Surface(
+                    modifier = Modifier.fillMaxSize()
+                ) {
+                    DardashaApp()
+                }
+            }
+        }
+    }
 
-      - name: Extract project
-        shell: bash
-        run: |
-          set -euo pipefail
+    override fun onDestroy() {
+        stopMatching()
+        super.onDestroy()
+    }
 
-          rm -rf "$GITHUB_WORKSPACE/project"
-          mkdir -p "$GITHUB_WORKSPACE/project"
+    @androidx.compose.runtime.Composable
+    private fun DardashaApp() {
 
-          unzip -q "$ZIP_FILE" \
-            -d "$GITHUB_WORKSPACE/project"
+        var screen by remember {
+            mutableStateOf(Screen.HOME)
+        }
 
-          SETTINGS_FILE="$(
-            find "$GITHUB_WORKSPACE/project" \
-              -type f \
-              \( -name "settings.gradle.kts" -o -name "settings.gradle" \) \
-              -print -quit
-          )"
+        var roomId by remember {
+            mutableStateOf<String?>(null)
+        }
 
-          if [ -z "$SETTINGS_FILE" ]; then
-            echo "::error::Android project not found."
-            exit 1
-          fi
+        var errorMessage by remember {
+            mutableStateOf<String?>(null)
+        }
 
-          PROJECT_DIR="$(dirname "$SETTINGS_FILE")"
+        LaunchedEffect(Unit) {
+            if (auth.currentUser == null) {
+                auth.signInAnonymously()
+                    .addOnFailureListener {
+                        errorMessage = "تعذر الاتصال بالخادم"
+                    }
+            }
+        }
 
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+        when (screen) {
 
-          echo "Android project:"
-          echo "$PROJECT_DIR"
+            Screen.HOME -> {
+                HomeScreen(
+                    errorMessage = errorMessage,
+                    onStart = {
+                        errorMessage = null
+                        screen = Screen.MATCHING
 
-      - name: Fix Android compatibility
-        shell: bash
-        run: |
-          set -euo pipefail
+                        startMatching(
+                            onMatched = { matchedRoom ->
+                                roomId = matchedRoom
+                                screen = Screen.CHAT
+                            },
+                            onError = { message ->
+                                errorMessage = message
+                                screen = Screen.HOME
+                            }
+                        )
+                    }
+                )
+            }
 
-          ROOT="$PROJECT_DIR/build.gradle.kts"
-          APP="$PROJECT_DIR/app/build.gradle.kts"
+            Screen.MATCHING -> {
+                MatchingScreen(
+                    onCancel = {
+                        stopMatching()
+                        screen = Screen.HOME
+                    }
+                )
+            }
 
-          test -f "$ROOT"
-          test -f "$APP"
+            Screen.CHAT -> {
+                val currentRoom = roomId
 
-          # AGP
-          sed -i \
-            's/8\.13\.0/8.13.2/g' \
-            "$ROOT"
+                if (currentRoom != null) {
+                    ChatScreen(
+                        roomId = currentRoom,
+                        onLeave = {
+                            leaveRoom(currentRoom)
+                            roomId = null
+                            screen = Screen.HOME
+                        }
+                    )
+                } else {
+                    screen = Screen.HOME
+                }
+            }
+        }
+    }
 
-          # Compose BOM
-          sed -i \
-            's/2026\.09\.00/2026.06.01/g' \
-            "$APP"
+    @androidx.compose.runtime.Composable
+    private fun HomeScreen(
+        errorMessage: String?,
+        onStart: () -> Unit
+    ) {
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = {
+                        Text("دردشة مع مجهول")
+                    }
+                )
+            }
+        ) { padding ->
 
-          # Core KTX:
-          # 1.18+ requires compileSdk 36.1.
-          # Project stays on compileSdk 36.
-          sed -i \
-            's/androidx\.core:core-ktx:1\.19\.1/androidx.core:core-ktx:1.17.0/g' \
-            "$APP"
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
 
-          # Keep compileSdk at 36.
-          sed -i \
-            's/compileSdk = 37/compileSdk = 36/g' \
-            "$APP"
+                Text(
+                    text = "أهلاً بك في دردشة مع مجهول",
+                    style = MaterialTheme.typography.headlineSmall,
+                    textAlign = TextAlign.Center
+                )
 
-          echo "===== FINAL ROOT CONFIG ====="
-          cat "$ROOT"
+                Spacer(
+                    modifier = Modifier.height(12.dp)
+                )
 
-          echo
-          echo "===== FINAL APP CONFIG ====="
-          cat "$APP"
+                Text(
+                    text = "تواصل مع أشخاص جدد بشكل مجهول.",
+                    style = MaterialTheme.typography.bodyLarge,
+                    textAlign = TextAlign.Center
+                )
 
-      - name: Verify configuration
-        shell: bash
-        run: |
-          set -euo pipefail
+                Spacer(
+                    modifier = Modifier.height(32.dp)
+                )
 
-          grep -q \
-            'id("com.android.application") version "8.13.2"' \
-            "$PROJECT_DIR/build.gradle.kts"
+                Button(
+                    onClick = onStart,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Search,
+                        contentDescription = null
+                    )
 
-          grep -q \
-            'compileSdk = 36' \
-            "$PROJECT_DIR/app/build.gradle.kts"
+                    Spacer(
+                        modifier = Modifier.size(8.dp)
+                    )
 
-          grep -q \
-            'androidx.core:core-ktx:1.17.0' \
-            "$PROJECT_DIR/app/build.gradle.kts"
+                    Text("ابدأ محادثة عشوائية")
+                }
 
-          grep -q \
-            'compose-bom:2026.06.01' \
-            "$PROJECT_DIR/app/build.gradle.kts"
+                if (!errorMessage.isNullOrBlank()) {
 
-          echo "Configuration verified successfully."
+                    Spacer(
+                        modifier = Modifier.height(20.dp)
+                    )
 
-      - name: Verify Android SDK 36
-        shell: bash
-        run: |
-          set -euo pipefail
+                    Text(
+                        text = errorMessage,
+                        color = MaterialTheme.colorScheme.error,
+                        textAlign = TextAlign.Center
+                    )
+                }
+            }
+        }
+    }
 
-          test -d "$ANDROID_HOME/platforms/android-36"
-          test -d "$ANDROID_HOME/build-tools/36.0.0"
+    @androidx.compose.runtime.Composable
+    private fun MatchingScreen(
+        onCancel: () -> Unit
+    ) {
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = {
+                        Text("جاري البحث")
+                    },
+                    navigationIcon = {
+                        IconButton(
+                            onClick = onCancel
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.ArrowBack,
+                                contentDescription = "رجوع"
+                            )
+                        }
+                    }
+                )
+            }
+        ) { padding ->
 
-          echo "Android SDK 36 is available."
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
 
-      - name: Setup Gradle 8.13
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.13"
+                CircularProgressIndicator()
 
-      - name: Build Debug APK
-        shell: bash
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: |
-          set -euo pipefail
+                Spacer(
+                    modifier = Modifier.height(24.dp)
+                )
 
-          java -version
-          gradle --version
+                Text(
+                    text = "جاري البحث عن شخص للمحادثة...",
+                    style = MaterialTheme.typography.titleMedium,
+                    textAlign = TextAlign.Center
+                )
 
-          gradle \
-            --no-daemon \
-            --stacktrace \
-            --warning-mode all \
-            assembleDebug
+                Spacer(
+                    modifier = Modifier.height(24.dp)
+                )
 
-      - name: Find APK
-        shell: bash
-        run: |
-          set -euo pipefail
+                TextButton(
+                    onClick = onCancel
+                ) {
+                    Text("إلغاء البحث")
+                }
+            }
+        }
+    }
 
-          APK="$(
-            find "$PROJECT_DIR/app/build/outputs/apk" \
-              -type f \
-              -name "*.apk" \
-              -print -quit
-          )"
+    @androidx.compose.runtime.Composable
+    private fun ChatScreen(
+        roomId: String,
+        onLeave: () -> Unit
+    ) {
 
-          if [ -z "$APK" ]; then
-            echo "::error::APK was not created."
-            exit 1
-          fi
+        var messageText by remember {
+            mutableStateOf("")
+        }
 
-          mkdir -p "$GITHUB_WORKSPACE/release"
+        var messages by remember {
+            mutableStateOf<List<ChatMessage>>(emptyList())
+        }
 
-          cp "$APK" \
-            "$GITHUB_WORKSPACE/release/dardasha-anonymous-debug.apk"
+        var sending by remember {
+            mutableStateOf(false)
+        }
 
-          echo "APK created successfully:"
-          ls -lh \
-            "$GITHUB_WORKSPACE/release/dardasha-anonymous-debug.apk"
+        var error by remember {
+            mutableStateOf<String?>(null)
+        }
 
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: dardasha-anonymous-debug
-          path: release/dardasha-anonymous-debug.apk
-          if-no-files-found: error
+        val listState = rememberLazyListState()
+
+        val currentUserId = auth.currentUser?.uid ?: ""
+
+        val messagesRef = remember(roomId) {
+            root
+                .child("rooms")
+                .child(roomId)
+                .child("messages")
+        }
+
+        LaunchedEffect(roomId) {
+
+            messagesRef
+                .limitToLast(200)
+                .addValueEventListener(
+                    object : ValueEventListener {
+
+                        override fun onDataChange(snapshot: DataSnapshot) {
+
+                            val result = mutableListOf<ChatMessage>()
+
+                            for (child in snapshot.children) {
+
+                                val id =
+                                    child.key ?: continue
+
+                                val senderId =
+                                    child.child("senderId")
+                                        .getValue(String::class.java)
+                                        ?: ""
+
+                                val text =
+                                    child.child("text")
+                                        .getValue(String::class.java)
+                                        ?: ""
+
+                                val timestamp =
+                                    child.child("timestamp")
+                                        .getValue(Long::class.java)
+                                        ?: 0L
+
+                                result.add(
+                                    ChatMessage(
+                                        id = id,
+                                        senderId = senderId,
+                                        text = text,
+                                        timestamp = timestamp
+                                    )
+                                )
+                            }
+
+                            messages = result.sortedBy {
+                                it.timestamp
+                            }
+                        }
+
+                        override fun onCancelled(
+                            databaseError: DatabaseError
+                        ) {
+                            error = "تعذر تحميل الرسائل"
+                        }
+                    }
+                )
+        }
+
+        LaunchedEffect(messages.size) {
+
+            if (messages.isNotEmpty()) {
+                listState.animateScrollToItem(
+                    messages.lastIndex
+                )
+            }
+        }
+
+        Scaffold(
+
+            topBar = {
+
+                TopAppBar(
+
+                    title = {
+                        Text("محادثة مجهولة")
+                    },
+
+                    navigationIcon = {
+
+                        IconButton(
+                            onClick = onLeave
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.ArrowBack,
+                                contentDescription = "إنهاء المحادثة"
+                            )
+                        }
+                    },
+
+                    actions = {
+
+                        IconButton(
+                            onClick = onLeave
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "إنهاء"
+                            )
+                        }
+                    }
+                )
+            }
+
+        ) { padding ->
+
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+            ) {
+
+                if (!error.isNullOrBlank()) {
+
+                    Text(
+                        text = error!!,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(12.dp)
+                    )
+                }
+
+                LazyColumn(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp),
+                    state = listState
+                ) {
+
+                    items(
+                        items = messages,
+                        key = {
+                            it.id
+                        }
+                    ) { message ->
+
+                        val mine =
+                            message.senderId == currentUserId
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(
+                                    vertical = 4.dp
+                                ),
+                            horizontalArrangement =
+                                if (mine) {
+                                    Arrangement.End
+                                } else {
+                                    Arrangement.Start
+                                }
+                        ) {
+
+                            Card(
+                                shape = RoundedCornerShape(
+                                    16.dp
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth(
+                                        0.82f
+                                    )
+                            ) {
+
+                                Text(
+                                    text = message.text,
+                                    modifier = Modifier.padding(
+                                        horizontal = 16.dp,
+                                        vertical = 10.dp
+                                    )
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .navigationBarsPadding()
+                        .padding(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+
+                    OutlinedTextField(
+                        value = messageText,
+                        onValueChange = {
+                            if (it.length <= 1000) {
+                                messageText = it
+                            }
+                        },
+                        modifier = Modifier.weight(1f),
+                        placeholder = {
+                            Text("اكتب رسالتك...")
+                        },
+                        singleLine = true,
+                        enabled = !sending
+                    )
+
+                    Spacer(
+                        modifier = Modifier.size(8.dp)
+                    )
+
+                    IconButton(
+                        onClick = {
+
+                            val cleanText =
+                                messageText.trim()
+
+                            if (
+                                cleanText.isBlank() ||
+                                sending
+                            ) {
+                                return@IconButton
+                            }
+
+                            val userId =
+                                auth.currentUser?.uid
+
+                            if (userId == null) {
+                                error =
+                                    "لم يتم تسجيل الدخول بعد"
+                                return@IconButton
+                            }
+
+                            sending = true
+                            error = null
+
+                            val messageId =
+                                messagesRef.push().key
+                                    ?: UUID.randomUUID()
+                                        .toString()
+
+                            val data =
+                                hashMapOf<String, Any>(
+                                    "senderId" to userId,
+                                    "text" to cleanText,
+                                    "timestamp" to
+                                            ServerValue.TIMESTAMP
+                                )
+
+                            messagesRef
+                                .child(messageId)
+                                .setValue(data)
+                                .addOnSuccessListener {
+                                    messageText = ""
+                                    sending = false
+                                }
+                                .addOnFailureListener {
+                                    sending = false
+                                    error =
+                                        "تعذر إرسال الرسالة"
+                                }
+                        },
+                        enabled =
+                            messageText.trim().isNotEmpty()
+                                    && !sending
+                    ) {
+
+                        Icon(
+                            imageVector = Icons.Default.Send,
+                            contentDescription = "إرسال"
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private fun startMatching(
+        onMatched: (String) -> Unit,
+        onError: (String) -> Unit
+    ) {
+
+        stopMatching()
+
+        val user = auth.currentUser
+
+        if (user == null) {
+            onError("لم يتم تسجيل الدخول إلى الخادم")
+            return
+        }
+
+        val userId = user.uid
+
+        val waiting =
+            root
+                .child("waiting")
+                .child(userId)
+
+        waitingRef = waiting
+
+        val data =
+            hashMapOf<String, Any>(
+                "uid" to userId,
+                "createdAt" to ServerValue.TIMESTAMP
+            )
+
+        waiting.setValue(data)
+            .addOnFailureListener {
+                waiting.removeValue()
+                waitingRef = null
+                onError("تعذر بدء البحث")
+                return@addOnFailureListener
+            }
+
+        val waitingRoot =
+            root.child("waiting")
+
+        matchingListener =
+            object : ValueEventListener {
+
+                override fun onDataChange(
+                    snapshot: DataSnapshot
+                ) {
+
+                    val currentUser =
+                        auth.currentUser
+                            ?: return
+
+                    val myId =
+                        currentUser.uid
+
+                    var otherId: String? = null
+
+                    for (child in snapshot.children) {
+
+                        val candidate =
+                            child.key ?: continue
+
+                        if (candidate != myId) {
+                            otherId = candidate
+                            break
+                        }
+                    }
+
+                    val partner =
+                        otherId ?: return
+
+                    val first =
+                        if (myId < partner) {
+                            myId
+                        } else {
+                            partner
+                        }
+
+                    val second =
+                        if (myId < partner) {
+                            partner
+                        } else {
+                            myId
+                        }
+
+                    val roomId =
+                        "${first}_$second"
+
+                    val room =
+                        root
+                            .child("rooms")
+                            .child(roomId)
+
+                    val roomData =
+                        hashMapOf<String, Any>(
+                            "user1" to first,
+                            "user2" to second,
+                            "createdAt" to
+                                    ServerValue.TIMESTAMP
+                        )
+
+                    room
+                        .updateChildren(roomData)
+                        .addOnSuccessListener {
+
+                            root
+                                .child("waiting")
+                                .child(myId)
+                                .removeValue()
+
+                            root
+                                .child("waiting")
+                                .child(partner)
+                                .removeValue()
+
+                            stopMatching()
+
+                            onMatched(roomId)
+                        }
+                        .addOnFailureListener {
+
+                            onError(
+                                "تعذر إنشاء المحادثة"
+                            )
+                        }
+                }
+
+                override fun onCancelled(
+                    error: DatabaseError
+                ) {
+
+                    onError(
+                        "تعذر الاتصال بقاعدة البيانات"
+                    )
+                }
+            }
+
+        waitingRoot.addValueEventListener(
+            matchingListener!!
+        )
+    }
+
+    private fun stopMatching() {
+
+        matchingListener?.let {
+            root
+                .child("waiting")
+                .removeEventListener(it)
+        }
+
+        matchingListener = null
+
+        waitingRef?.removeValue()
+
+        waitingRef = null
+    }
+
+    private fun leaveRoom(
+        roomId: String
+    ) {
+
+        stopMatching()
+
+        val userId =
+            auth.currentUser?.uid
+                ?: return
+
+        root
+            .child("rooms")
+            .child(roomId)
+            .child("presence")
+            .child(userId)
+            .removeValue()
+    }
+}
