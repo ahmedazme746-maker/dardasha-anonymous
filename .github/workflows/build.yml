@@ -31,16 +31,12 @@ jobs:
 
           if [ -z "$ZIP_FILE" ]; then
             echo "ERROR: Firebase project ZIP was not found."
-            echo "ZIP files in repository:"
             find "$GITHUB_WORKSPACE" -maxdepth 1 -type f -iname "*.zip" -print
             exit 1
           fi
 
-          echo "Using Firebase project ZIP:"
-          echo "$ZIP_FILE"
-
+          echo "Using: $ZIP_FILE"
           unzip -q "$ZIP_FILE" -d extracted
-          echo "ZIP extracted successfully."
 
       - name: Locate Android project
         shell: bash
@@ -54,21 +50,96 @@ jobs:
             -print -quit)
 
           if [ -z "$SETTINGS_FILE" ]; then
-            echo "ERROR: settings.gradle or settings.gradle.kts was not found."
+            echo "ERROR: Android project not found."
             exit 1
           fi
 
           PROJECT_DIR=$(dirname "$SETTINGS_FILE")
 
-          echo "Android project found:"
-          echo "$PROJECT_DIR"
-
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Project: $PROJECT_DIR"
 
-      - name: Prepare compatible Gradle plugin versions
+      - name: Fix Kotlin 2.3 compiler options
         shell: bash
         run: |
           set -e
+
+          BUILD_FILE="$PROJECT_DIR/app/build.gradle.kts"
+
+          if [ ! -f "$BUILD_FILE" ]; then
+            echo "ERROR: $BUILD_FILE not found."
+            exit 1
+          fi
+
+          echo "Patching: $BUILD_FILE"
+
+          python3 - "$BUILD_FILE" <<'PY'
+          import sys
+          import re
+
+          path = sys.argv[1]
+
+          with open(path, "r", encoding="utf-8") as f:
+              text = f.read()
+
+          if "import org.jetbrains.kotlin.gradle.dsl.JvmTarget" not in text:
+              text = "import org.jetbrains.kotlin.gradle.dsl.JvmTarget\n" + text
+
+          pattern = r'(?ms)^[ \t]*kotlinOptions[ \t]*\{[ \t]*\n[ \t]*jvmTarget[ \t]*=[ \t]*["\']17["\'][ \t]*\n[ \t]*\}[ \t]*\n?'
+
+          text, count = re.subn(pattern, "", text)
+
+          compiler_block = '''
+          kotlin {
+              compilerOptions {
+                  jvmTarget = JvmTarget.fromTarget("17")
+              }
+          }
+          '''
+
+          if "jvmTarget = JvmTarget.fromTarget(\"17\")" not in text:
+              text = text.rstrip() + "\n\n" + compiler_block.strip() + "\n"
+
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(text)
+
+          print("Removed old kotlinOptions block:", count)
+          print("Applied compilerOptions with JVM target 17.")
+          PY
+
+          echo "Final relevant configuration:"
+          grep -n -A5 -B2 "compilerOptions" "$BUILD_FILE" || true
+
+      - name: Fix Material3 experimental API
+        shell: bash
+        run: |
+          set -e
+
+          MAIN_FILE=$(find "$PROJECT_DIR/app/src/main" \
+            -type f \
+            -name "MainActivity.kt" \
+            -print -quit)
+
+          if [ -z "$MAIN_FILE" ]; then
+            echo "ERROR: MainActivity.kt not found."
+            exit 1
+          fi
+
+          if ! grep -q "ExperimentalMaterial3Api" "$MAIN_FILE"; then
+            sed -i '1i@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)' "$MAIN_FILE"
+          fi
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+
+      - name: Build Debug APK
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
 
           cat > "$GITHUB_WORKSPACE/ci-version-fix.init.gradle" <<'EOF'
           settingsEvaluated { settings ->
@@ -89,57 +160,13 @@ jobs:
           }
           EOF
 
-          echo "CI plugin compatibility rules prepared:"
-          echo "Kotlin -> 2.3.0"
-          echo "Android Gradle Plugin -> 8.13.0"
-
-      - name: Fix Kotlin Material3 experimental API
-        shell: bash
-        run: |
-          set -e
-
-          MAIN_FILE=$(find "$PROJECT_DIR/app/src/main" \
-            -type f \
-            -name "MainActivity.kt" \
-            -print -quit)
-
-          if [ -z "$MAIN_FILE" ]; then
-            echo "ERROR: MainActivity.kt was not found."
-            exit 1
-          fi
-
-          echo "MainActivity found:"
-          echo "$MAIN_FILE"
-
-          if ! grep -q "androidx.compose.material3.ExperimentalMaterial3Api" "$MAIN_FILE"; then
-            sed -i '1i@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)' "$MAIN_FILE"
-          fi
-
-          echo "Experimental Material3 API opt-in applied."
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.13'
-
-      - name: Build Debug APK
-        shell: bash
-        run: |
-          set -e
-          cd "$PROJECT_DIR"
-
-          echo "Starting Gradle build..."
-          echo "Gradle: 8.13"
-          echo "Android Gradle Plugin: 8.13.0"
-          echo "Kotlin: 2.3.0"
-
           gradle \
             --no-daemon \
             --init-script "$GITHUB_WORKSPACE/ci-version-fix.init.gradle" \
             assembleDebug \
             --stacktrace
 
-      - name: Locate generated APK
+      - name: Locate APK
         shell: bash
         run: |
           set -e
@@ -154,10 +181,10 @@ jobs:
             exit 1
           fi
 
-          echo "APK generated successfully:"
-          echo "$APK_FILE"
-
           cp "$APK_FILE" "$GITHUB_WORKSPACE/dardasha-anonymous-debug.apk"
+
+          echo "APK:"
+          echo "$APK_FILE"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
