@@ -12,7 +12,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
 
@@ -25,7 +25,7 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Find chat project
+      - name: Find chat project ZIP
         shell: bash
         run: |
           set -euo pipefail
@@ -36,17 +36,22 @@ jobs:
             ZIP="$GITHUB_WORKSPACE/dardasha-anonymous-chat-project-FINAL.zip"
           else
             echo "::error::Chat project ZIP not found."
-            find "$GITHUB_WORKSPACE" -maxdepth 1 -type f -name "*.zip" -printf '%f\n'
+            echo "ZIP files in repository:"
+            find "$GITHUB_WORKSPACE" -maxdepth 2 -type f -name "*.zip" -printf '%p\n' || true
             exit 1
           fi
 
           echo "ZIP_FILE=$ZIP" >> "$GITHUB_ENV"
-          echo "Using: $ZIP"
 
+          echo "Using project:"
+          echo "$ZIP"
+
+          echo "Checking ZIP integrity..."
           unzip -t "$ZIP" >/dev/null
-          echo "ZIP OK"
 
-      - name: Extract project
+          echo "ZIP is valid."
+
+      - name: Extract Android project
         shell: bash
         run: |
           set -euo pipefail
@@ -62,7 +67,10 @@ jobs:
 
           if [ -z "$SETTINGS_FILE" ]; then
             echo "::error::settings.gradle(.kts) not found."
-            find "$GITHUB_WORKSPACE/project" -maxdepth 5 -type f | sort
+
+            echo "Extracted files:"
+            find "$GITHUB_WORKSPACE/project" -maxdepth 6 -type f | sort
+
             exit 1
           fi
 
@@ -70,36 +78,10 @@ jobs:
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo "Android project:"
+          echo "Android project directory:"
           echo "$PROJECT_DIR"
 
-      - name: Fix known Android compatibility
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          ROOT="$PROJECT_DIR/build.gradle.kts"
-          APP="$PROJECT_DIR/app/build.gradle.kts"
-
-          test -f "$ROOT"
-          test -f "$APP"
-
-          # AGP 8.13.2
-          sed -i 's/8\.13\.0/8.13.2/g' "$ROOT"
-
-          # Compose 1.11.4 stable line.
-          # The old ZIP used Compose BOM 2026.09.00,
-          # which resolves to Compose 1.12.x and requires API 37.
-          sed -i 's/2026\.09\.00/2026.06.01/g' "$APP"
-
-          echo "Root Gradle:"
-          cat "$ROOT"
-
-          echo
-          echo "App Compose dependency:"
-          grep -n "compose-bom" "$APP"
-
-      - name: Verify Android SDK 36
+      - name: Prepare Android SDK 37
         shell: bash
         run: |
           set -euo pipefail
@@ -107,10 +89,138 @@ jobs:
           echo "ANDROID_HOME=$ANDROID_HOME"
           echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
 
-          test -d "$ANDROID_HOME/platforms/android-36"
-          test -d "$ANDROID_HOME/build-tools/36.0.0"
+          SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" \
+            -type f \
+            -name sdkmanager \
+            | head -n 1)"
 
-          echo "Android SDK 36 is available."
+          if [ -z "$SDKMANAGER" ]; then
+            echo "::error::sdkmanager was not found."
+            find "$ANDROID_HOME/cmdline-tools" -maxdepth 4 -type f 2>/dev/null | head -100 || true
+            exit 1
+          fi
+
+          echo "sdkmanager:"
+          echo "$SDKMANAGER"
+
+          echo "Accepting Android SDK licenses..."
+          yes | "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --licenses >/dev/null || true
+
+          echo "Installing Android API 37.0 and Build Tools 37.0.0..."
+
+          yes | "$SDKMANAGER" \
+            --sdk_root="$ANDROID_HOME" \
+            "platforms;android-37.0" \
+            "build-tools;37.0.0"
+
+          echo "Installed Android platforms:"
+          find "$ANDROID_HOME/platforms" -maxdepth 1 -mindepth 1 -type d | sort
+
+          echo "Installed Build Tools:"
+          find "$ANDROID_HOME/build-tools" -maxdepth 1 -mindepth 1 -type d | sort
+
+          if [ ! -d "$ANDROID_HOME/platforms/android-37.0" ]; then
+            echo "::error::Android platform 37.0 was not installed."
+            exit 1
+          fi
+
+          if [ ! -d "$ANDROID_HOME/build-tools/37.0.0" ]; then
+            echo "::error::Android Build Tools 37.0.0 were not installed."
+            exit 1
+          fi
+
+          # Compatibility alias for tools that still look for android-37.
+          if [ ! -e "$ANDROID_HOME/platforms/android-37" ]; then
+            ln -s "$ANDROID_HOME/platforms/android-37.0" \
+              "$ANDROID_HOME/platforms/android-37"
+          fi
+
+          echo "Android SDK 37 is ready."
+
+      - name: Fix Android project configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ROOT="$PROJECT_DIR/build.gradle.kts"
+          APP="$PROJECT_DIR/app/build.gradle.kts"
+
+          if [ ! -f "$ROOT" ]; then
+            echo "::error::Root build.gradle.kts not found."
+            exit 1
+          fi
+
+          if [ ! -f "$APP" ]; then
+            echo "::error::app/build.gradle.kts not found."
+            exit 1
+          fi
+
+          echo "Updating Android Gradle Plugin..."
+
+          sed -i \
+            's/id("com.android.application") version "8\.13\.0"/id("com.android.application") version "8.13.2"/g' \
+            "$ROOT"
+
+          echo "Updating compile SDK..."
+
+          python3 - "$APP" <<'PY'
+          from pathlib import Path
+          import sys
+
+          path = Path(sys.argv[1])
+          text = path.read_text()
+
+          old = "compileSdk = 36"
+
+          if old in text:
+              text = text.replace(
+                  old,
+                  """compileSdk = 37
+              compileSdkMinor = 0""",
+                  1
+              )
+          elif "compileSdk = 37" in text:
+              if "compileSdkMinor" not in text:
+                  text = text.replace(
+                      "compileSdk = 37",
+                      """compileSdk = 37
+              compileSdkMinor = 0""",
+                      1
+                  )
+          else:
+              raise SystemExit("compileSdk declaration was not found.")
+
+          path.write_text(text)
+          PY
+
+          echo
+          echo "===== ROOT BUILD FILE ====="
+          cat "$ROOT"
+
+          echo
+          echo "===== APP BUILD FILE ====="
+          cat "$APP"
+
+      - name: Verify Android configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Checking project configuration..."
+
+          grep -n 'com.android.application' "$PROJECT_DIR/build.gradle.kts"
+
+          grep -n 'compileSdk' "$PROJECT_DIR/app/build.gradle.kts"
+
+          grep -n 'compileSdkMinor' "$PROJECT_DIR/app/build.gradle.kts"
+
+          echo
+          echo "Checking SDK..."
+
+          test -d "$ANDROID_HOME/platforms/android-37.0"
+          test -d "$ANDROID_HOME/build-tools/37.0.0"
+
+          echo "SDK checks passed."
 
       - name: Setup Gradle 8.13
         uses: gradle/actions/setup-gradle@v4
@@ -123,8 +233,15 @@ jobs:
         run: |
           set -euo pipefail
 
+          echo "===== JAVA ====="
           java -version
+
+          echo
+          echo "===== GRADLE ====="
           gradle --version
+
+          echo
+          echo "===== BUILD ====="
 
           gradle \
             --no-daemon \
@@ -137,6 +254,8 @@ jobs:
         run: |
           set -euo pipefail
 
+          echo "Searching for APK..."
+
           APK="$(find "$PROJECT_DIR/app/build/outputs/apk" \
             -type f \
             -name "*.apk" \
@@ -144,7 +263,10 @@ jobs:
 
           if [ -z "$APK" ]; then
             echo "::error::APK was not created."
+
+            echo "Build output:"
             find "$PROJECT_DIR/app/build" -type f | sort || true
+
             exit 1
           fi
 
@@ -153,8 +275,11 @@ jobs:
           cp "$APK" \
             "$GITHUB_WORKSPACE/release/dardasha-anonymous-debug.apk"
 
-          echo "APK CREATED:"
-          ls -lh "$GITHUB_WORKSPACE/release/dardasha-anonymous-debug.apk"
+          echo
+          echo "===== APK CREATED ====="
+
+          ls -lh \
+            "$GITHUB_WORKSPACE/release/dardasha-anonymous-debug.apk"
 
       - name: Upload APK
         uses: actions/upload-artifact@v7
