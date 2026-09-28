@@ -1,744 +1,221 @@
-@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+name: Build Dardasha Anonymous APK
 
-package com.dardasha.anonymous
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
 
-import android.net.Uri
-import android.os.Bundle
-import android.widget.Toast
-import androidx.activity.ComponentActivity
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.activity.compose.setContent
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.unit.dp
-import coil.compose.AsyncImage
-import com.google.firebase.auth.EmailAuthProvider
-import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.database.*
-import com.google.firebase.storage.FirebaseStorage
-import java.util.UUID
+permissions:
+  contents: read
 
-private const val DB_URL = "https://dardasha-anonymous-default-rtdb.firebaseio.com"
-private const val MAX_MESSAGE_LENGTH = 1000
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
 
-data class UserProfile(
-    val uid: String = "",
-    val name: String = "",
-    val email: String = "",
-    val gender: String = "",
-    val avatarUrl: String = "",
-    val avatarPendingUrl: String = "",
-    val avatarPending: Boolean = false,
-    val verified: Boolean = false,
-    val admin: Boolean = false,
-    val online: Boolean = false,
-    val joinedAt: Long = 0L
-)
+    steps:
 
-data class Msg(val id: String, val senderId: String, val text: String, val timestamp: Long)
-data class ChatPreview(val roomId: String, val peerId: String, val peerName: String, val peerVerified: Boolean, val lastMessage: String, val updatedAt: Long)
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-class MainActivity : ComponentActivity() {
-    private lateinit var auth: FirebaseAuth
-    private lateinit var db: FirebaseDatabase
-    private lateinit var storage: FirebaseStorage
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
 
-    private var uid by mutableStateOf("")
-    private var profile by mutableStateOf<UserProfile?>(null)
-    private var screen by mutableStateOf("landing")
-    private var selectedTab by mutableStateOf(0)
-    private var loading by mutableStateOf(false)
-    private var errorText by mutableStateOf<String?>(null)
+      - name: Find Dardasha ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
 
-    private val messages = mutableStateListOf<Msg>()
-    private val onlineUsers = mutableStateListOf<UserProfile>()
-    private val chats = mutableStateListOf<ChatPreview>()
-    private var currentRoom by mutableStateOf<String?>(null)
-    private var currentPeer by mutableStateOf<UserProfile?>(null)
+          echo "Searching for Dardasha project ZIP..."
 
-    private var usersListener: ValueEventListener? = null
-    private var chatsListener: ValueEventListener? = null
-    private var messagesListener: ChildEventListener? = null
-    private var currentRoomRef: DatabaseReference? = null
+          ZIP_FILE=$(find "$GITHUB_WORKSPACE" \
+            -type f \
+            -iname "*dardasha*.zip" \
+            -not -path "*/.git/*" \
+            -print -quit || true)
 
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        auth = FirebaseAuth.getInstance()
-        db = FirebaseDatabase.getInstance(DB_URL)
-        storage = FirebaseStorage.getInstance()
+          if [ -z "$ZIP_FILE" ]; then
+            echo "ERROR: No Dardasha ZIP found."
+            echo ""
+            echo "ZIP files found:"
+            find "$GITHUB_WORKSPACE" \
+              -type f \
+              -iname "*.zip" \
+              -not -path "*/.git/*" \
+              -print \
+              | sort
+            exit 1
+          fi
 
-        val current = auth.currentUser
-        if (current == null) {
-            uid = ""
-            screen = "landing"
-        } else {
-            uid = current.uid
-            loadProfileOrSetup()
-        }
+          echo "Using ZIP:"
+          echo "$ZIP_FILE"
 
-        setContent {
-            MaterialTheme {
-                Surface(Modifier.fillMaxSize()) { App() }
-            }
-        }
-    }
+          unzip -t "$ZIP_FILE" >/dev/null
 
-    override fun onStart() {
-        super.onStart()
-        if (uid.isNotBlank()) setPresence(true)
-    }
+          echo "ZIP integrity: OK"
 
-    override fun onStop() {
-        if (uid.isNotBlank()) setPresence(false)
-        super.onStop()
-    }
+          echo "ZIP_FILE=$ZIP_FILE" >> "$GITHUB_ENV"
 
-    @Composable
-    private fun App() {
-        when (screen) {
-            "landing" -> LandingScreen()
-            "guest" -> GuestScreen()
-            "register" -> RegisterScreen()
-            "login" -> LoginScreen()
-            "setup" -> GuestScreen()
-            "main" -> MainScreen()
-            "chat" -> ChatScreen()
-            "admin" -> AdminScreen()
-            "edit" -> EditProfileScreen()
-            else -> LandingScreen()
-        }
-    }
+      - name: Extract Android project
+        shell: bash
+        run: |
+          set -euo pipefail
 
-    @Composable
-    private fun LandingScreen() {
-        SimpleScaffold("دردشة مع مجهول") {
-            Column(
-                Modifier.fillMaxSize().padding(24.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
-            ) {
-                Text("أهلاً بك", style = MaterialTheme.typography.headlineLarge)
-                Spacer(Modifier.height(12.dp))
-                Text("اختر طريقة الدخول", textAlign = TextAlign.Center)
-                Spacer(Modifier.height(28.dp))
-                Button({ screen = "login" }, Modifier.fillMaxWidth()) { Text("تسجيل الدخول") }
-                Spacer(Modifier.height(12.dp))
-                OutlinedButton({ screen = "guest" }, Modifier.fillMaxWidth()) { Text("دخول كزائر") }
-                Spacer(Modifier.height(12.dp))
-                OutlinedButton({ screen = "register" }, Modifier.fillMaxWidth()) { Text("إنشاء حساب") }
-                ErrorText()
-            }
-        }
-    }
+          PROJECT_ROOT="$RUNNER_TEMP/dardasha-project"
 
-    @Composable
-    private fun GuestScreen() {
-        var name by remember { mutableStateOf(profile?.name ?: "") }
-        var gender by remember { mutableStateOf(profile?.gender ?: "") }
-        SimpleScaffold("دخول كزائر", back = { screen = "landing" }) {
-            Column(Modifier.fillMaxSize().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("اختار اسمك وجنسك", style = MaterialTheme.typography.headlineSmall)
-                Spacer(Modifier.height(20.dp))
-                OutlinedTextField(name, { name = it }, Modifier.fillMaxWidth(), label = { Text("الاسم") }, singleLine = true)
-                                Spacer(Modifier.height(18.dp))
-                GenderChoice(gender) { if (profile?.gender.isNullOrBlank()) gender = it }
-                Spacer(Modifier.height(24.dp))
-                Button(
-                    onClick = { createGuestProfile(name, gender) },
-                    enabled = !loading && name.trim().isNotEmpty() && gender.isNotBlank(),
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text("دخول") }
-                ErrorText()
-            }
-        }
-    }
+          rm -rf "$PROJECT_ROOT"
+          mkdir -p "$PROJECT_ROOT"
 
-    @Composable
-    private fun RegisterScreen() {
-        var name by remember { mutableStateOf("") }
-        var email by remember { mutableStateOf("") }
-        var password by remember { mutableStateOf("") }
-        var gender by remember { mutableStateOf("") }
-        SimpleScaffold("إنشاء حساب", back = { screen = "landing" }) {
-            Column(Modifier.fillMaxSize().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                OutlinedTextField(name, { name = it }, Modifier.fillMaxWidth(), label = { Text("الاسم") }, singleLine = true)
-                Spacer(Modifier.height(10.dp))
-                OutlinedTextField(email, { email = it }, Modifier.fillMaxWidth(), label = { Text("البريد الإلكتروني") }, singleLine = true)
-                Spacer(Modifier.height(10.dp))
-                OutlinedTextField(password, { password = it }, Modifier.fillMaxWidth(), label = { Text("كلمة المرور") }, singleLine = true, visualTransformation = PasswordVisualTransformation())
-                Spacer(Modifier.height(16.dp))
-                GenderChoice(gender) { gender = it }
-                Spacer(Modifier.height(20.dp))
-                Button(
-                    { register(name, email, password, gender) },
-                    Modifier.fillMaxWidth(),
-                    enabled = !loading && name.trim().isNotEmpty() && email.contains("@") && password.length >= 6 && gender.isNotBlank()
-                ) { Text(if (loading) "جاري الإنشاء..." else "إنشاء الحساب") }
-                ErrorText()
-            }
-        }
-    }
+          unzip -q "$ZIP_FILE" -d "$PROJECT_ROOT"
 
-    @Composable
-    private fun LoginScreen() {
-        var email by remember { mutableStateOf("") }
-        var password by remember { mutableStateOf("") }
-        SimpleScaffold("تسجيل الدخول", back = { screen = "landing" }) {
-            Column(Modifier.fillMaxSize().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                OutlinedTextField(email, { email = it }, Modifier.fillMaxWidth(), label = { Text("البريد الإلكتروني") }, singleLine = true)
-                Spacer(Modifier.height(10.dp))
-                OutlinedTextField(password, { password = it }, Modifier.fillMaxWidth(), label = { Text("كلمة المرور") }, singleLine = true, visualTransformation = PasswordVisualTransformation())
-                Spacer(Modifier.height(20.dp))
-                Button({ login(email, password) }, Modifier.fillMaxWidth(), enabled = !loading) {
-                    Text(if (loading) "جاري الدخول..." else "دخول")
-                }
-                ErrorText()
-            }
-        }
-    }
+          echo "Searching for Android project..."
 
-    @Composable
-    private fun MainScreen() {
-        val tabs = listOf("بحث عشوائي", "الرسائل", "نشط الآن", "الملف الشخصي")
-        Scaffold(
-            topBar = { TopAppBar(title = { Text(tabs[selectedTab]) }) },
-            bottomBar = {
-                NavigationBar {
-                    tabs.forEachIndexed { i, label ->
-                        NavigationBarItem(selected = selectedTab == i, onClick = { selectedTab = i }, icon = { Text(label.take(1)) }, label = { Text(label) })
-                    }
-                }
-            }
-        ) { p ->
-            Box(Modifier.fillMaxSize().padding(p)) {
-                when (selectedTab) {
-                    0 -> RandomScreen()
-                    1 -> MessagesScreen()
-                    2 -> OnlineScreen()
-                    3 -> ProfileScreen()
-                }
-            }
-        }
-    }
+          SETTINGS_FILE=$(find "$PROJECT_ROOT" \
+            -type f \
+            \( \
+              -name "settings.gradle.kts" \
+              -o \
+              -name "settings.gradle" \
+            \) \
+            -not -path "*/.gradle/*" \
+            -print -quit || true)
 
-    @Composable
-    private fun RandomScreen() {
-        Column(
-            Modifier.fillMaxSize().padding(24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
-        ) {
-            Text("ابدأ محادثة عشوائية", style = MaterialTheme.typography.headlineSmall)
-            Spacer(Modifier.height(12.dp))
-            Text("سيتم البحث عن شخص متاح الآن.")
-            Spacer(Modifier.height(24.dp))
-            Button({ startMatching() }, enabled = !loading, modifier = Modifier.fillMaxWidth()) {
-                Text(if (loading) "جاري البحث..." else "ابدأ محادثة عشوائية")
-            }
-            ErrorText()
-        }
-    }
+          if [ -z "$SETTINGS_FILE" ]; then
+            echo "ERROR: Android project not found inside ZIP."
+            echo ""
+            echo "Extracted files:"
+            find "$PROJECT_ROOT" \
+              -maxdepth 8 \
+              -type f \
+              | sort \
+              | head -300
+            exit 1
+          fi
 
-    @Composable
-    private fun MessagesScreen() {
-        if (chats.isEmpty()) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("لا توجد محادثات حتى الآن") }
-        } else {
-            LazyColumn(Modifier.fillMaxSize().padding(12.dp)) {
-                items(chats.sortedByDescending { it.updatedAt }, key = { it.roomId }) { c ->
-                    Card(onClick = { openRoom(c.roomId, c.peerId) }, modifier = Modifier.fillMaxWidth().padding(vertical = 5.dp)) {
-                        Column(Modifier.padding(16.dp)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Avatar(c.peerName, c.peerVerified, null, Modifier.size(46.dp))
-                                Spacer(Modifier.width(12.dp))
-                                Column {
-                                    Text(c.peerName, style = MaterialTheme.typography.titleMedium)
-                                    Text(c.lastMessage.ifBlank { "محادثة" }, maxLines = 1)
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+          PROJECT_DIR=$(dirname "$SETTINGS_FILE")
 
-    @Composable
-    private fun OnlineScreen() {
-        val list = onlineUsers.sortedWith(compareByDescending<UserProfile> { it.admin }.thenByDescending { it.joinedAt })
-        val admin = list.firstOrNull { it.admin }
-        val others = list.filterNot { it.admin }
-        if (list.isEmpty()) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("لا يوجد مستخدمون نشطون الآن") }
-        } else {
-            LazyColumn(Modifier.fillMaxSize().padding(12.dp)) {
-                if (admin != null) {
-                    item(key = "fixed-admin") {
-                        Card(Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
-                            Row(Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Avatar(admin.name, true, admin.avatarUrl.takeIf { it.isNotBlank() }, Modifier.size(50.dp))
-                                Spacer(Modifier.width(12.dp))
-                                Column(Modifier.weight(1f)) {
-                                    Text("Admin", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
-                                    Text(admin.name, style = MaterialTheme.typography.titleMedium)
-                                }
-                                Text("●", color = MaterialTheme.colorScheme.primary)
-                            }
-                        }
-                    }
-                }
-                items(others, key = { it.uid }) { u ->
-                    Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-                                      Row(Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Avatar(u.name, u.verified, u.avatarUrl.takeIf { it.isNotBlank() }, Modifier.size(50.dp))
-                            Spacer(Modifier.width(12.dp))
-                            Column(Modifier.weight(1f)) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(u.name, style = MaterialTheme.typography.titleMedium)
-                                    if (u.verified) Text(" ✓", color = MaterialTheme.colorScheme.primary)
-                                }
-                                Text(if (u.admin) "الأدمن" else if (u.gender == "female") "بنت" else "ولد")
-                            }
-                            Text("●", color = MaterialTheme.colorScheme.primary)
-                        }
-                    }
-                }
-            }
-        }
-    }
+          echo "========================================"
+          echo "ANDROID PROJECT FOUND"
+          echo "$PROJECT_DIR"
+          echo "========================================"
 
-    @Composable
-    private fun ProfileScreen() {
-        val u = profile
-        Column(Modifier.fillMaxSize().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            Avatar(u?.name ?: "مستخدم", u?.verified == true, u?.avatarUrl?.takeIf { it.isNotBlank() }, Modifier.size(110.dp))
-            Spacer(Modifier.height(12.dp))
-            Text(u?.name ?: "", style = MaterialTheme.typography.headlineSmall)
-            if (u?.verified == true) Text("✓ موثّق", color = MaterialTheme.colorScheme.primary)
-            Spacer(Modifier.height(20.dp))
-            Button({ screen = "edit" }, Modifier.fillMaxWidth()) { Text("تعديل الملف الشخصي") }
-            if (u?.admin == true) {
-                Spacer(Modifier.height(10.dp))
-                OutlinedButton({ screen = "admin" }, Modifier.fillMaxWidth()) { Text("لوحة الأدمن") }
-            }
-            Spacer(Modifier.height(10.dp))
-            OutlinedButton({
-                setPresence(false)
-                auth.signOut()
-                cleanup()
-                uid = ""
-                profile = null
-                screen = "landing"
-                selectedTab = 0
-            }, Modifier.fillMaxWidth()) { Text("تسجيل الخروج") }
-        }
-    }
+          if [ -f "$PROJECT_DIR/app/build.gradle.kts" ]; then
+            echo "app/build.gradle.kts found."
+          elif [ -f "$PROJECT_DIR/app/build.gradle" ]; then
+            echo "app/build.gradle found."
+          else
+            echo "ERROR: app Gradle file not found."
 
-    @Composable
-    private fun EditProfileScreen() {
-        var name by remember { mutableStateOf(profile?.name ?: "") }
-        val launcher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-            if (uri != null) uploadPendingAvatar(uri)
-        }
-        SimpleScaffold("تعديل الملف الشخصي", back = { screen = "main" }) {
-            Column(Modifier.fillMaxSize().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                Avatar(profile?.name ?: "مستخدم", profile?.verified == true, profile?.avatarUrl?.takeIf { it.isNotBlank() }, Modifier.size(100.dp))
-                Spacer(Modifier.height(12.dp))
-                OutlinedButton({ launcher.launch("image/*") }) { Text("اختيار صورة") }
-                if (profile?.avatarPending == true) Text("الصورة في انتظار موافقة الأدمن", color = MaterialTheme.colorScheme.primary)
-                Spacer(Modifier.height(12.dp))
-                OutlinedTextField(name, { name = it }, Modifier.fillMaxWidth(), label = { Text("الاسم") }, singleLine = true)
-                Spacer(Modifier.height(10.dp))
-                Text("الجنس: ${if (profile?.gender == "female") "بنت" else "ولد"}")
-                Spacer(Modifier.height(18.dp))
-                Button({ saveName(name) }, Modifier.fillMaxWidth(), enabled = name.trim().isNotEmpty()) { Text("حفظ") }
-            }
-        }
-    }
+            find "$PROJECT_DIR" \
+              -maxdepth 5 \
+              -type f \
+              | sort
 
-    @Composable
-    private fun AdminScreen() {
-        var users by remember { mutableStateOf<List<UserProfile>>(emptyList()) }
-        var pending by remember { mutableStateOf<List<UserProfile>>(emptyList()) }
-        DisposableEffect(Unit) {
-            val ref = db.reference.child("users")
-            val l = object : ValueEventListener {
-                override fun onDataChange(s: DataSnapshot) {
-                    val all = s.children.mapNotNull { parseUser(it) }.filter { it.uid != uid }
-                    users = all
-                    pending = all.filter { it.avatarPending && it.avatarPendingUrl.isNotBlank() }
-                }
-                override fun onCancelled(e: DatabaseError) {}
-            }
-            ref.addValueEventListener(l)
-            onDispose { ref.removeEventListener(l) }
-        }
-        SimpleScaffold("لوحة الأدمن", back = { screen = "main" }) {
-            LazyColumn(Modifier.fillMaxSize().padding(12.dp)) {
-                item { Text("إدارة المستخدمين", style = MaterialTheme.typography.headlineSmall); Spacer(Modifier.height(10.dp)) }
-                items(users, key = { it.uid }) { u ->
-                    Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-                        Column(Modifier.padding(12.dp)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Avatar(u.name, u.verified, u.avatarUrl.takeIf { it.isNotBlank() }, Modifier.size(48.dp))
-                                Spacer(Modifier.width(10.dp))
-                                Column(Modifier.weight(1f)) {
-                                    Text(u.name)
-                                    Text(u.email.ifBlank { "زائر" })
-                                }
-                            }
-                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Button({ setVerified(u.uid, !u.verified) }, Modifier.weight(1f)) {
-                                    Text(if (u.verified) "إلغاء التوثيق" else "توثيق ✓")
-                                }
-                                if (u.avatarPending) {
-                                    Button({ approveAvatar(u) }, Modifier.weight(1f)) { Text("قبول الصورة") }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+            exit 1
+          fi
 
-    @Composable
-    private fun ChatScreen() {
-        val peer = currentPeer
-        var text by remember(currentRoom) { mutableStateOf("") }
-        SimpleScaffold("محادثة مع ${peer?.name ?: "مستخدم"}", back = { closeRoom() }) {
-            Column(Modifier.fillMaxSize().padding(8.dp)) {
-                LazyColumn(Modifier.weight(1f).fillMaxWidth(), reverseLayout = false) {
-                    items(messages, key = { it.id }) { m ->
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = if (m.senderId == uid) Arrangement.End else Arrangement.Start) {
-                            Surface(tonalElevation = 2.dp, shape = MaterialTheme.shapes.medium) {
-                                Text(m.text, Modifier.padding(10.dp))
-                            }
-                        }
-                        Spacer(Modifier.height(6.dp))
-                    }
-                }
-                Row(Modifier.fillMaxWidth().navigationBarsPadding(), verticalAlignment = Alignment.CenterVertically) {
-                    OutlinedTextField(text, { if (it.length <= MAX_MESSAGE_LENGTH) text = it }, Modifier.weight(1f), placeholder = { Text("اكتب رسالة") }, singleLine = true)
-                    Spacer(Modifier.width(6.dp))
-                    Button({ val v=text.trim(); if(v.isNotEmpty()){ sendMessage(v); text="" } }, enabled = text.trim().isNotEmpty()) { Text("إرسال") }
-                }
-            }
-        }
-    }
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-    @Composable
-    private fun SimpleScaffold(title: String, back: (() -> Unit)? = null, content: @Composable ColumnScope.() -> Unit) {
-        Scaffold(topBar = {
-            TopAppBar(
-                title = { Text(title) },
-                navigationIcon = { if (back != null) TextButton(onClick = back) { Text("رجوع") } }
-            )
-        }) { p -> Column(Modifier.fillMaxSize().padding(p), content = content) }
-    }
+      - name: Check MainActivity
+        shell: bash
+        run: |
+          set -euo pipefail
 
-    @Composable
-    private fun GenderChoice(value: String, onChange: (String) -> Unit) {
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            FilterChip(selected = value == "male", onClick = { onChange("male") }, label = { Text("ولد 👨") })
-            FilterChip(selected = value == "female", onClick = { onChange("female") }, label = { Text("بنت 👩") })
-        }
-    }
+          MAIN_FILE=$(find "$PROJECT_DIR/app/src/main" \
+            -type f \
+            -name "MainActivity.kt" \
+            -print -quit || true)
 
-    @Composable
-    private fun Avatar(name: String, verified: Boolean, url: String?, modifier: Modifier) {
-        Surface(modifier = modifier, shape = CircleShape, tonalElevation = 2.dp) {
-            if (!url.isNullOrBlank()) AsyncImage(model = url, contentDescription = null, modifier = Modifier.fillMaxSize())
-            else Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text(if (name.isNotBlank() && profile?.gender == "female") "👩" else "👨", style = MaterialTheme.typography.headlineSmall)
-            }
-        }
-    }
+          if [ -z "$MAIN_FILE" ]; then
+            echo "ERROR: MainActivity.kt not found."
+            exit 1
+          fi
 
-    @Composable
-    private fun ErrorText() {
-        errorText?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(12.dp), textAlign = TextAlign.Center) }
-    }
+          echo "MainActivity:"
+          echo "$MAIN_FILE"
 
-    private fun loadProfileOrSetup() {
-        if (uid.isBlank()) return
-        db.reference.child("users").child(uid).get().addOnSuccessListener { s ->
-            val u = parseUser(s)
-            profile = u
-            if (u == null || u.name.isBlank() || u.gender.isBlank()) {
-                screen = "setup"
-            } else {
-                screen = "main"
-                startListeners()
-                setPresence(true)
-            }
-        }.addOnFailureListener { e -> errorText = e.message ?: "تعذر تحميل الحساب" }
-    }
+          echo ""
+          echo "Checking known Firebase error..."
 
-    private fun createGuestProfile(name: String, gender: String) {
-        if (uid.isBlank()) {
-            auth.signInAnonymously().addOnSuccessListener { r ->
-                uid = r.user!!.uid
-                saveProfile(name.trim(), "", gender, anonymous = true)
-            }
-        } else saveProfile(name.trim(), "", gender, anonymous = true)
-    }
+          if grep -n 'onDisconnect().child' "$MAIN_FILE"; then
+            echo "ERROR: Invalid onDisconnect().child() found."
+            exit 1
+          fi
 
-    private fun register(name: String, email: String, password: String, gender: String) {
-        loading = true; errorText = null
-        val current = auth.currentUser
-        val credential = EmailAuthProvider.getCredential(email.trim(), password)
-        val task = if (current?.isAnonymous == true) current.linkWithCredential(credential)
-        else auth.createUserWithEmailAndPassword(email.trim(), password)
-        task.addOnSuccessListener { r ->
-            uid = r.user?.uid ?: uid
-            saveProfile(name.trim(), email.trim(), gender, anonymous = false)
-        }.addOnFailureListener { e -> loading = false; errorText = e.message ?: "تعذر إنشاء الحساب" }
-    }
+          echo "Firebase presence syntax check: OK"
 
-    private fun login(email: String, password: String) {
-        loading = true; errorText = null
-        auth.signInWithEmailAndPassword(email.trim(), password)
-            .addOnSuccessListener { r -> uid = r.user!!.uid; loadProfileOrSetup() }
-            .addOnFailureListener { e -> loading = false; errorText = e.message ?: "تعذر تسجيل الدخول" }
-    }
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.13"
 
-    private fun saveProfile(name: String, email: String, gender: String, anonymous: Boolean) {
-        val ref = db.reference.child("users").child(uid)
-        ref.get().addOnSuccessListener { existing ->
-            val old = parseUser(existing)
-            val data = mutableMapOf<String, Any>(
-                "uid" to uid,
-                "name" to name,
-                "email" to email,
-                "gender" to (old?.gender?.takeIf { it.isNotBlank() } ?: gender),
-                "verified" to (old?.verified ?: false),
-                "admin" to (old?.admin ?: false),
-                "online" to true,
-                "joinedAt" to (old?.joinedAt ?: ServerValue.TIMESTAMP)
-            )
-            ref.updateChildren(data).addOnSuccessListener {
-                if (old?.admin != true) maybeClaimFirstAdmin()
-                setPresence(true)
-                loading = false
-                loadProfileOrSetup()
-            }.addOnFailureListener { e -> loading = false; errorText = e.message ?: "تعذر حفظ البيانات" }
-        }
-    }
+      - name: Test Gradle configuration
+        shell: bash
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -euo pipefail
 
-    private fun maybeClaimFirstAdmin() {
-        val meta = db.getReference("meta").child("adminUid")
-        meta.runTransaction(object : Transaction.Handler {
-            override fun doTransaction(d: MutableData): Transaction.Result {
-                if (d.value == null) d.value = uid
-                return Transaction.success(d)
-            }
-            override fun onComplete(e: DatabaseError?, committed: Boolean, s: DataSnapshot?) {
-                if (s?.getValue(String::class.java) == uid) {
-                    db.reference.child("users").child(uid).child("admin").setValue(true)
-                }
-            }
-        })
-    }
+          gradle \
+            --no-daemon \
+            --stacktrace \
+            --warning-mode all \
+            tasks \
+            --console=plain
 
-    private fun setPresence(isOnline: Boolean) {
-        if (uid.isBlank()) return
-        val ref = db.reference.child("users").child(uid)
-        if (isOnline) {
-            ref.child("online").setValue(true)
-            ref.child("joinedAt").setValue(ServerValue.TIMESTAMP)
-            ref.child("online").onDisconnect().setValue(false)
-        } else ref.child("online").setValue(false)
-    }
+      - name: Build Debug APK
+        shell: bash
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -euo pipefail
 
-    private fun startListeners() {
-        usersListener?.let { db.reference.child("users").removeEventListener(it) }
-        usersListener = object : ValueEventListener {
-            override fun onDataChange(s: DataSnapshot) {
-                onlineUsers.clear()
-                s.children.mapNotNull { parseUser(it) }.filter { it.online }.forEach { onlineUsers.add(it) }
-                val me = s.child(uid).let { parseUser(it) }
-                if (me != null) profile = me
-            }
-            override fun onCancelled(e: DatabaseError) {}
-        }
-        db.reference.child("users").addValueEventListener(usersListener!!)
+          echo "========================================"
+          echo "BUILDING DARDASHA APK"
+          echo "========================================"
 
-        chatsListener?.let { db.reference.child("userChats").child(uid).removeEventListener(it) }
-        chatsListener = object : ValueEventListener {
-            override fun onDataChange(s: DataSnapshot) {
-                chats.clear()
-                s.children.mapNotNull { snap ->
-                    ChatPreview(
-                        roomId = snap.key ?: return@mapNotNull null,
-                        peerId = snap.child("peerId").getValue(String::class.java).orEmpty(),
-                        peerName = snap.child("peerName").getValue(String::class.java).orEmpty(),
-                        peerVerified = snap.child("peerVerified").getValue(Boolean::class.java) ?: false,
-                        lastMessage = snap.child("lastMessage").getValue(String::class.java).orEmpty(),
-                        updatedAt = snap.child("updatedAt").getValue(Long::class.java) ?: 0L
-                    )
-                }.forEach { chats.add(it) }
-            }
-            override fun onCancelled(e: DatabaseError) {}
-        }
-        db.reference.child("userChats").child(uid).addValueEventListener(chatsListener!!)
-    }
+          gradle \
+            --no-daemon \
+            --stacktrace \
+            --warning-mode all \
+            clean \
+            :app:assembleDebug \
+            --console=plain
 
-    private fun startMatching() {
-        if (uid.isBlank()) return
-        loading = true; errorText = null
-        val root = db.reference.child("waiting")
-        val me = root.child(uid)
-              me.onDisconnect().removeValue()
-        root.runTransaction(object : Transaction.Handler {
-            override fun doTransaction(d: MutableData): Transaction.Result {
-                var peer: String? = null
-                for (c in d.children) {
-                    if (c.key != uid && c.child("roomId").value == null) { peer = c.key; break }
-                }
-                if (peer == null) d.child(uid).value = mapOf("createdAt" to ServerValue.TIMESTAMP)
-                else {
-                    val p = peer!!
-                    val roomId = listOf(uid, p).sorted().joinToString("-")
-                    d.child(uid).value = mapOf("createdAt" to ServerValue.TIMESTAMP, "roomId" to roomId, "peerId" to p)
-                    d.child(p).child("roomId").value = roomId
-                    d.child(p).child("peerId").value = uid
-                }
-                return Transaction.success(d)
-            }
-            override fun onComplete(e: DatabaseError?, committed: Boolean, s: DataSnapshot?) {
-                if (e != null || !committed) { loading = false; errorText = e?.message ?: "تعذر البحث"; return@onComplete }
-                val r = s?.child(uid)?.child("roomId")?.getValue(String::class.java)
-                if (!r.isNullOrBlank()) openRoom(r, s.child(uid).child("peerId").getValue(String::class.java).orEmpty())
-                else waitForMatch()
-            }
-        })
-    }
+      - name: Find generated APK
+        shell: bash
+        run: |
+          set -euo pipefail
 
-    private fun waitForMatch() {
-        val ref = db.reference.child("waiting").child(uid)
-        ref.addListenerForSingleValueEvent(object : ValueEventListener {
-            override fun onDataChange(s: DataSnapshot) {
-                val r = s.child("roomId").getValue(String::class.java)
-                if (!r.isNullOrBlank()) {
-                    ref.removeValue()
-                    openRoom(r, s.child("peerId").getValue(String::class.java).orEmpty())
-                } else {
-                    ref.addValueEventListener(object : ValueEventListener {
-                        override fun onDataChange(x: DataSnapshot) {
-                            val room = x.child("roomId").getValue(String::class.java)
-                            if (!room.isNullOrBlank()) { ref.removeValue(); openRoom(room, x.child("peerId").getValue(String::class.java).orEmpty()) }
-                        }
-                        override fun onCancelled(e: DatabaseError) {}
-                    })
-                }
-            }
-            override fun onCancelled(e: DatabaseError) { loading = false; errorText = e.message }
-        })
-    }
+          APK=$(find "$PROJECT_DIR/app/build/outputs/apk" \
+            -type f \
+            -name "*.apk" \
+            -print -quit || true)
 
-    private fun openRoom(roomId: String, peerId: String) {
-        db.reference.child("waiting").child(uid).removeValue()
-        currentRoomRef?.let { messagesListener?.let(it::removeEventListener) }
-        currentRoom = roomId
-        messages.clear()
-        loading = false
-        screen = "chat"
-        db.reference.child("users").child(peerId).get().addOnSuccessListener { currentPeer = parseUser(it) }
+          if [ -z "$APK" ]; then
+            echo "ERROR: APK was not generated."
 
-        val ref = db.reference.child("rooms").child(roomId).child("messages")
-        currentRoomRef = ref
-        messagesListener = object : ChildEventListener {
-            override fun onChildAdded(s: DataSnapshot, p: String?) {
-                val m = Msg(s.key ?: return, s.child("senderId").getValue(String::class.java).orEmpty(), s.child("text").getValue(String::class.java).orEmpty(), s.child("timestamp").getValue(Long::class.java) ?: 0L)
-                if (m.text.isNotBlank() && messages.none { it.id == m.id }) messages.add(m)
-                messages.sortBy { it.timestamp }
-            }
-            override fun onChildChanged(s: DataSnapshot, p: String?) {}
-            override fun onChildRemoved(s: DataSnapshot) { messages.removeAll { it.id == s.key } }
-            override fun onChildMoved(s: DataSnapshot, p: String?) {}
-            override fun onCancelled(e: DatabaseError) { errorText = e.message }
-        }
-        ref.addChildEventListener(messagesListener!!)
-        db.reference.child("rooms").child(roomId).child("members").updateChildren(mapOf(uid to true, peerId to true))
-    }
+            find "$PROJECT_DIR/app/build/outputs" \
+              -maxdepth 10 \
+              -type f \
+              | sort || true
 
-    private fun sendMessage(text: String) {
-        val room = currentRoom ?: return
-        val peer = currentPeer ?: return
-        val ref = db.reference.child("rooms").child(room).child("messages").push()
-        val data = mapOf<String, Any>("senderId" to uid, "text" to text.take(MAX_MESSAGE_LENGTH), "timestamp" to ServerValue.TIMESTAMP)
-        ref.setValue(data).addOnSuccessListener {
-            val now = System.currentTimeMillis()
-            val mine = mapOf("peerId" to peer.uid, "peerName" to peer.name, "peerVerified" to peer.verified, "lastMessage" to text, "updatedAt" to now)
-            val theirs = mapOf("peerId" to uid, "peerName" to (profile?.name ?: "مستخدم"), "peerVerified" to (profile?.verified ?: false), "lastMessage" to text, "updatedAt" to now)
-            db.reference.child("userChats").child(uid).child(room).setValue(mine)
-            db.reference.child("userChats").child(peer.uid).child(room).setValue(theirs)
-        }.addOnFailureListener { errorText = it.message }
-    }
+            exit 1
+          fi
 
-    private fun closeRoom() {
-        messagesListener?.let { currentRoomRef?.removeEventListener(it) }
-        messagesListener = null; currentRoomRef = null; currentRoom = null; currentPeer = null; messages.clear()
-        screen = "main"; selectedTab = 1
-    }
+          echo "APK generated:"
+          echo "$APK"
 
-    private fun saveName(name: String) {
-        db.reference.child("users").child(uid).child("name").setValue(name.trim()).addOnSuccessListener { loadProfileOrSetup() }
-    }
+          mkdir -p "$GITHUB_WORKSPACE/release"
 
-    private fun uploadPendingAvatar(uri: Uri) {
-        val ref = storage.reference.child("pendingAvatars/$uid-${UUID.randomUUID()}.jpg")
-        loading = true
-        ref.putFile(uri).continueWithTask { ref.downloadUrl }.addOnSuccessListener { url ->
-            db.reference.child("users").child(uid).updateChildren(mapOf("avatarPendingUrl" to url.toString(), "avatarPending" to true))
-                .addOnSuccessListener { loading = false; loadProfileOrSetup() }
-        }.addOnFailureListener { loading = false; errorText = it.message ?: "تعذر رفع الصورة" }
-    }
+          cp "$APK" \
+            "$GITHUB_WORKSPACE/release/dardasha-anonymous-debug.apk"
 
-    private fun setVerified(targetUid: String, value: Boolean) {
-        db.reference.child("users").child(targetUid).child("verified").setValue(value)
-    }
-
-    private fun approveAvatar(u: UserProfile) {
-        db.reference.child("users").child(u.uid).updateChildren(
-            mapOf("avatarUrl" to u.avatarPendingUrl, "avatarPending" to false, "avatarPendingUrl" to "")
-        )
-    }
-
-    private fun parseUser(s: DataSnapshot): UserProfile? {
-        if (!s.exists()) return null
-        return UserProfile(
-            uid = s.key ?: s.child("uid").getValue(String::class.java).orEmpty(),
-            name = s.child("name").getValue(String::class.java).orEmpty(),
-            email = s.child("email").getValue(String::class.java).orEmpty(),
-            gender = s.child("gender").getValue(String::class.java).orEmpty(),
-            avatarUrl = s.child("avatarUrl").getValue(String::class.java).orEmpty(),
-            avatarPendingUrl = s.child("avatarPendingUrl").getValue(String::class.java).orEmpty(),
-            avatarPending = s.child("avatarPending").getValue(Boolean::class.java) ?: false,
-            verified = s.child("verified").getValue(Boolean::class.java) ?: false,
-            admin = s.child("admin").getValue(Boolean::class.java) ?: false,
-            online = s.child("online").getValue(Boolean::class.java) ?: false,
-            joinedAt = s.child("joinedAt").getValue(Long::class.java) ?: 0L
-        )
-    }
-
-    private fun cleanup() {
-        usersListener?.let { db.reference.child("users").removeEventListener(it) }
-        chatsListener?.let { db.reference.child("userChats").child(uid).removeEventListener(it) }
-        messagesListener?.let { currentRoomRef?.removeEventListener(it) }
-        usersListener = null; chatsListener = null; messagesListener = null; currentRoomRef = null
-        onlineUsers.clear(); chats.clear(); messages.clear()
-    }
-
-    private fun showError(msg: String) { errorText = msg; Toast.makeText(this, msg, Toast.LENGTH_LONG).show() }
-}
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: dardasha-anonymous-debug
+          path: release/dardasha-anonymous-debug.apk
+          if-no-files-found: error
