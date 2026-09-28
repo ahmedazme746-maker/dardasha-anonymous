@@ -11,190 +11,112 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
 
     steps:
 
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
       - name: Setup Java 17
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      - name: Find project ZIP
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "Searching for Dardasha ZIP..."
-
-          ZIP=""
-
-          # Prefer the corrected ZIP
-          ZIP=$(find "$GITHUB_WORKSPACE" \
-            -type f \
-            -iname "Dardasha-GitHub-READY-FIXED.zip" \
-            -not -path "*/.git/*" \
-            -print -quit || true)
-
-          # Then try the other known names
-          if [ -z "$ZIP" ]; then
-            ZIP=$(find "$GITHUB_WORKSPACE" \
-              -type f \
-              \( \
-                -iname "dardasha-anonymous-chat-project-FINAL.zip" \
-                -o -iname "dardasha-anonymous-chat-project.zip" \
-                -o -iname "*dardasha*ready*.zip" \
-                -o -iname "*dardasha*.zip" \
-              \) \
-              -not -path "*/.git/*" \
-              -print -quit || true)
-          fi
-
-          if [ -z "$ZIP" ]; then
-            echo "ERROR: No Dardasha ZIP was found."
-            echo ""
-            echo "ZIP files found:"
-            find "$GITHUB_WORKSPACE" \
-              -type f \
-              -iname "*.zip" \
-              -not -path "*/.git/*" \
-              -print | sort || true
-            exit 1
-          fi
-
-          echo "Using ZIP:"
-          echo "$ZIP"
-
-          echo "ZIP_FILE=$ZIP" >> "$GITHUB_ENV"
-
-          unzip -t "$ZIP" >/dev/null
-
-          echo "ZIP integrity: OK"
-
-      - name: Extract Android project
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          rm -rf "$RUNNER_TEMP/dardasha-project"
-          mkdir -p "$RUNNER_TEMP/dardasha-project"
-
-          unzip -q "$ZIP_FILE" \
-            -d "$RUNNER_TEMP/dardasha-project"
-
-          echo "Searching for Android project..."
-
-          SETTINGS_FILE=$(find "$RUNNER_TEMP/dardasha-project" \
-            -type f \
-            \( \
-              -name "settings.gradle.kts" \
-              -o -name "settings.gradle" \
-            \) \
-            -not -path "*/.gradle/*" \
-            -print -quit || true)
-
-          if [ -z "$SETTINGS_FILE" ]; then
-            echo "ERROR: settings.gradle.kts was not found."
-
-            echo ""
-            echo "Files inside ZIP:"
-            find "$RUNNER_TEMP/dardasha-project" \
-              -maxdepth 6 \
-              -type f \
-              | sort \
-              | head -300
-
-            exit 1
-          fi
-
-          PROJECT_DIR=$(dirname "$SETTINGS_FILE")
-
-          echo "Android project found:"
-          echo "$PROJECT_DIR"
-
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-
-      - name: Validate Android project
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "Checking Android project..."
-
-          test -f "$PROJECT_DIR/settings.gradle.kts" \
-            || test -f "$PROJECT_DIR/settings.gradle"
-
-          test -f "$PROJECT_DIR/app/build.gradle.kts" \
-            || test -f "$PROJECT_DIR/app/build.gradle"
-
-          test -d "$PROJECT_DIR/app/src/main"
-
-          echo "Android project structure: OK"
-
-      - name: Fix Android build compatibility
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          ROOT="$PROJECT_DIR/build.gradle.kts"
-          APP="$PROJECT_DIR/app/build.gradle.kts"
-
-          if [ -f "$ROOT" ]; then
-
-            # Use compatible Android Gradle Plugin
-            sed -i \
-              's/com.android.application" version "8.13.0"/com.android.application" version "8.13.2"/g' \
-              "$ROOT"
-
-            # Force the Kotlin plugin version used by this project
-            sed -i \
-              's/org.jetbrains.kotlin.android" version "2.3.0"/org.jetbrains.kotlin.android" version "2.3.0"/g' \
-              "$ROOT"
-
-          fi
-
-          if [ -f "$APP" ]; then
-
-            # Keep Compose BOM compatible with compileSdk 36
-            sed -i \
-              's/compose-bom:2026.09.00/compose-bom:2026.07.00/g' \
-              "$APP"
-
-          fi
-
-          echo "Compatibility fixes applied."
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v6
+      - name: Setup Gradle 8.13
+        uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.13"
 
-      - name: Build Debug APK
+      - name: Verify Android project
         shell: bash
-        working-directory: ${{ env.PROJECT_DIR }}
         run: |
           set -euo pipefail
 
-          echo "Starting Gradle build..."
+          echo "Checking project..."
+
+          test -f settings.gradle.kts
+          test -f build.gradle.kts
+          test -f app/build.gradle.kts
+          test -f app/google-services.json
+          test -d app/src/main
+
+          echo "Project structure OK."
+
+      - name: Configure Compose BOM
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Checking Compose BOM..."
+
+          grep -n "compose-bom" app/build.gradle.kts
+
+          # Use the official current stable Compose BOM.
+          sed -i \
+            's/compose-bom:[0-9][0-9.]*"/compose-bom:2026.09.00"/g' \
+            app/build.gradle.kts
+
+          echo "Compose BOM after configuration:"
+          grep -n "compose-bom" app/build.gradle.kts
+
+      - name: Verify Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "ANDROID_HOME=$ANDROID_HOME"
+
+          test -d "$ANDROID_HOME/platforms/android-36" \
+            || {
+              echo "ERROR: Android SDK 36 not installed."
+              exit 1
+            }
+
+          echo "Android SDK 36 OK."
+
+      - name: Verify Gradle configuration
+        shell: bash
+        working-directory: .
+        run: |
+          set -euo pipefail
+
+          echo "Running Gradle configuration check..."
+
+          gradle \
+            --no-daemon \
+            --stacktrace \
+            --warning-mode all \
+            tasks \
+            --console=plain
+
+      - name: Build Debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "======================================"
+          echo "Building Dardasha Debug APK"
+          echo "======================================"
 
           gradle \
             --no-daemon \
             --stacktrace \
             --warning-mode all \
             clean \
-            assembleDebug
+            :app:assembleDebug \
+            --console=plain
 
       - name: Find generated APK
         shell: bash
         run: |
           set -euo pipefail
 
-          APK=$(find "$PROJECT_DIR/app/build/outputs/apk" \
+          echo "Searching for generated APK..."
+
+          APK=$(find app/build/outputs/apk/debug \
             -type f \
             -name "*.apk" \
             -print -quit || true)
@@ -204,22 +126,21 @@ jobs:
 
             echo ""
             echo "Build output:"
-            find "$PROJECT_DIR/app/build" \
+            find app/build/outputs \
               -maxdepth 8 \
               -type f \
-              | sort \
-              | head -300 || true
+              | sort || true
 
             exit 1
           fi
 
-          echo "APK generated:"
+          echo "APK found:"
           echo "$APK"
 
-          mkdir -p "$GITHUB_WORKSPACE/release"
+          mkdir -p release
 
           cp "$APK" \
-            "$GITHUB_WORKSPACE/release/dardasha-anonymous-debug.apk"
+            release/dardasha-anonymous-debug.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
