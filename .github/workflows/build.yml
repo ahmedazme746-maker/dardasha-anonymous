@@ -1,6 +1,6 @@
 name: Build Dardasha Anonymous Chat
 
-on:
+"on":
   push:
     branches:
       - main
@@ -30,23 +30,19 @@ jobs:
         run: |
           set -euo pipefail
 
-          ZIP_FILE="$GITHUB_WORKSPACE/dardasha-anonymous-chat-project.zip"
+          ZIP="$GITHUB_WORKSPACE/dardasha-anonymous-chat-project.zip"
 
-          if [ ! -f "$ZIP_FILE" ]; then
-            echo "::error::dardasha-anonymous-chat-project.zip was not found."
-            echo "Available ZIP files:"
-            find "$GITHUB_WORKSPACE" -maxdepth 1 -type f -name "*.zip" -printf '%f\n'
+          if [ ! -f "$ZIP" ]; then
+            echo "::error::dardasha-anonymous-chat-project.zip not found."
+            find "$GITHUB_WORKSPACE" -maxdepth 2 -type f -name "*.zip" -print
             exit 1
           fi
 
-          echo "ZIP_FILE=$ZIP_FILE" >> "$GITHUB_ENV"
+          unzip -t "$ZIP" >/dev/null
 
-          echo "Using:"
-          echo "$ZIP_FILE"
+          echo "ZIP_FILE=$ZIP" >> "$GITHUB_ENV"
 
-          unzip -t "$ZIP_FILE" >/dev/null
-
-          echo "ZIP check passed."
+          echo "Project ZIP found and verified."
 
       - name: Extract project
         shell: bash
@@ -54,7 +50,6 @@ jobs:
           set -euo pipefail
 
           rm -rf "$GITHUB_WORKSPACE/project"
-
           mkdir -p "$GITHUB_WORKSPACE/project"
 
           unzip -q "$ZIP_FILE" \
@@ -63,23 +58,12 @@ jobs:
           SETTINGS_FILE="$(
             find "$GITHUB_WORKSPACE/project" \
               -type f \
-              \( \
-                -name "settings.gradle.kts" \
-                -o \
-                -name "settings.gradle" \
-              \) \
-              -not -path "*/.gradle/*" \
+              \( -name "settings.gradle.kts" -o -name "settings.gradle" \) \
               -print -quit
           )"
 
           if [ -z "$SETTINGS_FILE" ]; then
-            echo "::error::Android project was not found."
-
-            find "$GITHUB_WORKSPACE/project" \
-              -maxdepth 6 \
-              -type f \
-              | sort
-
+            echo "::error::Android project not found."
             exit 1
           fi
 
@@ -90,7 +74,7 @@ jobs:
           echo "Android project:"
           echo "$PROJECT_DIR"
 
-      - name: Fix project compatibility
+      - name: Fix Android compatibility
         shell: bash
         run: |
           set -euo pipefail
@@ -98,133 +82,68 @@ jobs:
           ROOT="$PROJECT_DIR/build.gradle.kts"
           APP="$PROJECT_DIR/app/build.gradle.kts"
 
-          if [ ! -f "$ROOT" ]; then
-            echo "::error::Root build.gradle.kts not found."
-            exit 1
-          fi
+          test -f "$ROOT"
+          test -f "$APP"
 
-          if [ ! -f "$APP" ]; then
-            echo "::error::app/build.gradle.kts not found."
-            exit 1
-          fi
-
-          # AGP compatible with Kotlin 2.3
+          # AGP
           sed -i \
-            's/id("com.android.application") version "8\.13\.0"/id("com.android.application") version "8.13.2"/g' \
+            's/8\.13\.0/8.13.2/g' \
             "$ROOT"
 
-          # Keep compileSdk on API 36
-          sed -i \
-            's/compileSdk = 37/compileSdk = 36/g' \
-            "$APP"
-
-          # Compose stable line compatible with API 36
+          # Compose BOM
           sed -i \
             's/2026\.09\.00/2026.06.01/g' \
             "$APP"
 
-          # Core 1.18+ requires API 36.1.
-          # Use 1.17.0 so compileSdk 36 remains sufficient.
+          # Core KTX:
+          # 1.18+ requires compileSdk 36.1.
+          # Project stays on compileSdk 36.
           sed -i \
             's/androidx\.core:core-ktx:1\.19\.1/androidx.core:core-ktx:1.17.0/g' \
             "$APP"
 
-          echo
-          echo "===== ROOT BUILD FILE ====="
+          # Keep compileSdk at 36.
+          sed -i \
+            's/compileSdk = 37/compileSdk = 36/g' \
+            "$APP"
+
+          echo "===== FINAL ROOT CONFIG ====="
           cat "$ROOT"
 
           echo
-          echo "===== APP BUILD FILE ====="
+          echo "===== FINAL APP CONFIG ====="
           cat "$APP"
-
-      - name: Fix Material3 opt-in
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          MAIN_FILE="$(
-            find "$PROJECT_DIR/app/src/main" \
-              -type f \
-              -name "MainActivity.kt" \
-              -print -quit
-          )"
-
-          if [ -z "$MAIN_FILE" ]; then
-            echo "::error::MainActivity.kt was not found."
-            exit 1
-          fi
-
-          if ! grep -q \
-            "ExperimentalMaterial3Api" \
-            "$MAIN_FILE"; then
-
-            sed -i \
-              '1i@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)' \
-              "$MAIN_FILE"
-          fi
-
-          echo "Material3 opt-in checked."
 
       - name: Verify configuration
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Checking AGP..."
-
           grep -q \
             'id("com.android.application") version "8.13.2"' \
             "$PROJECT_DIR/build.gradle.kts"
-
-          echo "AGP OK."
-
-          echo "Checking compileSdk..."
 
           grep -q \
             'compileSdk = 36' \
             "$PROJECT_DIR/app/build.gradle.kts"
 
-          echo "compileSdk OK."
-
-          echo "Checking Core KTX..."
-
           grep -q \
             'androidx.core:core-ktx:1.17.0' \
             "$PROJECT_DIR/app/build.gradle.kts"
-
-          echo "Core KTX OK."
-
-          echo "Checking Compose BOM..."
 
           grep -q \
             'compose-bom:2026.06.01' \
             "$PROJECT_DIR/app/build.gradle.kts"
 
-          echo "Compose BOM OK."
-
-          echo
-          echo "===== FINAL DEPENDENCY CHECK ====="
-
-          grep -n \
-            -E \
-            'compileSdk|core-ktx|compose-bom' \
-            "$PROJECT_DIR/app/build.gradle.kts"
-
-          echo
-          echo "All configuration checks passed."
+          echo "Configuration verified successfully."
 
       - name: Verify Android SDK 36
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "ANDROID_HOME=$ANDROID_HOME"
-
-          test -d \
-            "$ANDROID_HOME/platforms/android-36"
-
-          test -d \
-            "$ANDROID_HOME/build-tools/36.0.0"
+          test -d "$ANDROID_HOME/platforms/android-36"
+          test -d "$ANDROID_HOME/build-tools/36.0.0"
 
           echo "Android SDK 36 is available."
 
@@ -239,15 +158,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "===== JAVA ====="
           java -version
-
-          echo
-          echo "===== GRADLE ====="
           gradle --version
-
-          echo
-          echo "===== BUILDING APK ====="
 
           gradle \
             --no-daemon \
@@ -260,29 +172,24 @@ jobs:
         run: |
           set -euo pipefail
 
-          APK_FILE="$(
+          APK="$(
             find "$PROJECT_DIR/app/build/outputs/apk" \
               -type f \
               -name "*.apk" \
               -print -quit
           )"
 
-          if [ -z "$APK_FILE" ]; then
-            echo "::error::APK was not generated."
-
-            find "$PROJECT_DIR/app/build" \
-              -type f \
-              | sort || true
-
+          if [ -z "$APK" ]; then
+            echo "::error::APK was not created."
             exit 1
           fi
 
           mkdir -p "$GITHUB_WORKSPACE/release"
 
-          cp "$APK_FILE" \
+          cp "$APK" \
             "$GITHUB_WORKSPACE/release/dardasha-anonymous-debug.apk"
 
-          echo "APK created:"
+          echo "APK created successfully:"
           ls -lh \
             "$GITHUB_WORKSPACE/release/dardasha-anonymous-debug.apk"
 
