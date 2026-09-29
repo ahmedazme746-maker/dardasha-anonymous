@@ -26,11 +26,12 @@ jobs:
         with:
           gradle-version: "8.13"
 
-      - name: Verify Gradle
+      - name: Verify tools
         run: |
+          java -version
           gradle --version
 
-      - name: Extract Dardasha project
+      - name: Extract Dardasha
         shell: bash
         run: |
           set -e
@@ -45,9 +46,6 @@ jobs:
             echo "ERROR: Dardasha-FINAL-FIXED-V3.zip not found"
             exit 1
           fi
-
-          echo "Using ZIP:"
-          echo "$ZIP"
 
           rm -rf "$RUNNER_TEMP/dardasha"
           mkdir -p "$RUNNER_TEMP/dardasha"
@@ -68,28 +66,48 @@ jobs:
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo "Project:"
+          echo "PROJECT:"
           echo "$PROJECT_DIR"
 
-      - name: Fix compatible dependencies
+      - name: Fix source and dependencies
         shell: bash
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           set -e
 
           FILE="app/build.gradle.kts"
+          MAIN="app/src/main/java/com/dardasha/anonymous/MainActivity.kt"
 
-          echo "Fixing compileSdk..."
+          echo "================================"
+          echo "FIXING MAINACTIVITY"
+          echo "================================"
+
+          if [ ! -f "$MAIN" ]; then
+            echo "ERROR: MainActivity.kt not found"
+            exit 1
+          fi
+
+          # Fix Firebase Realtime Database presence.
+          sed -i \
+            's/ref\.onDisconnect()\.child("online")\.setValue(false)/ref.child("online").onDisconnect().setValue(false)/g' \
+            "$MAIN"
+
+          echo "Checking presence code:"
+          grep -n "onDisconnect" "$MAIN" || true
+
+          echo ""
+          echo "================================"
+          echo "FIXING DEPENDENCIES"
+          echo "================================"
+
           sed -i -E \
             's/compileSdk[[:space:]]*=[[:space:]]*[0-9]+/compileSdk = 36/g' \
             "$FILE"
 
-          echo "Fixing Compose BOM..."
           sed -i -E \
             's/(androidx\.compose:compose-bom:)[0-9]+\.[0-9]+\.[0-9]+/\12026.06.01/g' \
             "$FILE"
 
-          echo "Fixing AndroidX Core..."
           sed -i -E \
             's/(androidx\.core:core-ktx:)[0-9]+\.[0-9]+\.[0-9]+/\11.18.0/g' \
             "$FILE"
@@ -117,14 +135,40 @@ jobs:
           }
           EOF
 
-          echo "Configuration:"
-          grep -nE \
-            'compileSdk|compose-bom|androidx.core|resolutionStrategy' \
-            "$FILE" || true
+          echo ""
+          echo "compileSdk:"
+          grep -n "compileSdk" "$FILE" || true
+
+          echo ""
+          echo "Compose:"
+          grep -n "compose-bom" "$FILE" || true
+
+          echo ""
+          echo "Core:"
+          grep -n "androidx.core" "$FILE" || true
+
+      - name: Check source for known error
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -e
+
+          MAIN="app/src/main/java/com/dardasha/anonymous/MainActivity.kt"
+
+          if grep -n 'ref\.onDisconnect()\.child' "$MAIN"; then
+            echo "ERROR: Old onDisconnect().child() code still exists"
+            exit 1
+          fi
+
+          if ! grep -n 'ref\.child("online")\.onDisconnect()' "$MAIN"; then
+            echo "ERROR: Correct presence code not found"
+            exit 1
+          fi
+
+          echo "Known source error: FIXED"
 
       - name: Build APK
-        shell: bash
         working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
         run: |
           set -o pipefail
 
@@ -156,9 +200,9 @@ jobs:
           cp "$APK" \
             release/dardasha-anonymous-debug.apk
 
-          echo "================================"
+          echo "=============================="
           echo "APK READY"
-          echo "================================"
+          echo "=============================="
 
           ls -lh release/dardasha-anonymous-debug.apk
 
