@@ -8,50 +8,94 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
+
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Java 17
-        uses: actions/setup-java@v5
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      - name: Extract project
+      - name: Setup Gradle 8.13
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.13"
+
+      - name: Verify Gradle
+        run: |
+          gradle --version
+
+      - name: Extract Dardasha project
+        shell: bash
         run: |
           set -e
-          ZIP=$(find . -type f -iname "*dardasha*.zip" -not -path "./.git/*" | head -1)
-          test -n "$ZIP"
 
-          mkdir -p "$RUNNER_TEMP/project"
-          unzip -q "$ZIP" -d "$RUNNER_TEMP/project"
+          ZIP=$(find "$GITHUB_WORKSPACE" \
+            -type f \
+            -iname "Dardasha-FINAL-FIXED-V3.zip" \
+            -not -path "*/.git/*" \
+            -print -quit)
 
-          PROJECT=$(find "$RUNNER_TEMP/project" \
-            -name settings.gradle.kts \
-            -o -name settings.gradle | head -1)
+          if [ -z "$ZIP" ]; then
+            echo "ERROR: Dardasha-FINAL-FIXED-V3.zip not found"
+            exit 1
+          fi
 
-          test -n "$PROJECT"
+          echo "Using ZIP:"
+          echo "$ZIP"
 
-          PROJECT_DIR=$(dirname "$PROJECT")
+          rm -rf "$RUNNER_TEMP/dardasha"
+          mkdir -p "$RUNNER_TEMP/dardasha"
+
+          unzip -q "$ZIP" -d "$RUNNER_TEMP/dardasha"
+
+          SETTINGS=$(find "$RUNNER_TEMP/dardasha" \
+            -type f \
+            \( -name "settings.gradle.kts" -o -name "settings.gradle" \) \
+            -print -quit)
+
+          if [ -z "$SETTINGS" ]; then
+            echo "ERROR: Gradle project not found"
+            exit 1
+          fi
+
+          PROJECT_DIR=$(dirname "$SETTINGS")
+
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo "Project: $PROJECT_DIR"
+          echo "Project:"
+          echo "$PROJECT_DIR"
 
-      - name: Fix dependencies
+      - name: Fix compatible dependencies
+        shell: bash
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           set -e
 
           FILE="app/build.gradle.kts"
 
+          echo "Fixing compileSdk..."
           sed -i -E \
-            's/(androidx\.core:core-ktx:)[0-9.]+/\11.18.0/g' \
+            's/compileSdk[[:space:]]*=[[:space:]]*[0-9]+/compileSdk = 36/g' \
+            "$FILE"
+
+          echo "Fixing Compose BOM..."
+          sed -i -E \
+            's/(androidx\.compose:compose-bom:)[0-9]+\.[0-9]+\.[0-9]+/\12026.06.01/g' \
+            "$FILE"
+
+          echo "Fixing AndroidX Core..."
+          sed -i -E \
+            's/(androidx\.core:core-ktx:)[0-9]+\.[0-9]+\.[0-9]+/\11.18.0/g' \
             "$FILE"
 
           sed -i -E \
-            's/(androidx\.core:core:)[0-9.]+/\11.18.0/g' \
+            's/(androidx\.core:core:)[0-9]+\.[0-9]+\.[0-9]+/\11.18.0/g' \
             "$FILE"
 
           cat >> "$FILE" <<'EOF'
@@ -62,17 +106,24 @@ jobs:
                       (requested.name == "core" || requested.name == "core-ktx")) {
                       useVersion("1.18.0")
                   }
+
+                  if (requested.group == "androidx.compose.animation" ||
+                      requested.group == "androidx.compose.foundation" ||
+                      requested.group == "androidx.compose.runtime" ||
+                      requested.group == "androidx.compose.ui") {
+                      useVersion("1.11.4")
+                  }
               }
           }
           EOF
 
-          echo "compileSdk:"
-          grep "compileSdk" "$FILE" || true
-
-          echo "Core:"
-          grep "androidx.core" "$FILE" || true
+          echo "Configuration:"
+          grep -nE \
+            'compileSdk|compose-bom|androidx.core|resolutionStrategy' \
+            "$FILE" || true
 
       - name: Build APK
+        shell: bash
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           set -o pipefail
@@ -84,17 +135,37 @@ jobs:
             --console=plain \
             2>&1 | tee "$RUNNER_TEMP/build.log"
 
-      - name: Show APK
+      - name: Find APK
         if: success()
+        shell: bash
         run: |
-          find "$PROJECT_DIR/app/build/outputs" \
+          set -e
+
+          APK=$(find "$PROJECT_DIR/app/build/outputs/apk" \
             -type f \
             -name "*.apk" \
-            -print
+            -print -quit)
+
+          if [ -z "$APK" ]; then
+            echo "ERROR: APK not found"
+            exit 1
+          fi
+
+          mkdir -p release
+
+          cp "$APK" \
+            release/dardasha-anonymous-debug.apk
+
+          echo "================================"
+          echo "APK READY"
+          echo "================================"
+
+          ls -lh release/dardasha-anonymous-debug.apk
 
       - name: Upload APK
         if: success()
         uses: actions/upload-artifact@v4
         with:
           name: dardasha-anonymous-debug
-          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/**/*.apk
+          path: release/dardasha-anonymous-debug.apk
+          if-no-files-found: error
