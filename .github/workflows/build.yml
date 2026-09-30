@@ -24,57 +24,72 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Find and extract Dardasha project
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mkdir -p /tmp/dardasha
-
-          ZIP_FILE="$(find . -maxdepth 3 -type f -iname '*.zip' | head -n 1)"
-
-          if [ -z "${ZIP_FILE}" ]; then
-            echo "ERROR: No Dardasha ZIP file found."
-            exit 1
-          fi
-
-          echo "Using ZIP: ${ZIP_FILE}"
-
-          unzip -q "${ZIP_FILE}" -d /tmp/dardasha
-
-          PROJECT_DIR="$(find /tmp/dardasha -name settings.gradle.kts -type f -print -quit | xargs -r dirname)"
-
-          if [ -z "${PROJECT_DIR}" ]; then
-            echo "ERROR: settings.gradle.kts was not found after extraction."
-            find /tmp/dardasha -maxdepth 4 -type f | sort
-            exit 1
-          fi
-
-          echo "Project directory: ${PROJECT_DIR}"
-
-          rm -rf ./project
-          cp -R "${PROJECT_DIR}" ./project
-
-          echo "Project files:"
-          find ./project -maxdepth 3 -type f | sort
-
       - name: Setup Gradle 8.13
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.13'
           cache-disabled: true
 
-      - name: Validate project structure
+      - name: Find and extract Dardasha V3
         shell: bash
         run: |
           set -euo pipefail
 
-          test -f project/settings.gradle.kts
-          test -f project/build.gradle.kts
-          test -f project/app/build.gradle.kts
-          test -f project/app/src/main/java/com/dardasha/anonymous/MainActivity.kt
+          ZIP_FILE="./Dardasha-FINAL-CLEAN-SOURCE-V3.zip"
 
-          echo "Project structure OK."
+          echo "Checking for V3:"
+          echo "$ZIP_FILE"
+
+          if [ ! -f "$ZIP_FILE" ]; then
+            echo "ERROR: Dardasha-FINAL-CLEAN-SOURCE-V3.zip was not found."
+            echo "ZIP files in repository:"
+            find . -type f -iname "*.zip" -print
+            exit 1
+          fi
+
+          rm -rf /tmp/dardasha
+          mkdir -p /tmp/dardasha
+
+          unzip -q "$ZIP_FILE" -d /tmp/dardasha
+
+          PROJECT_DIR=$(find /tmp/dardasha \
+            -name "settings.gradle.kts" \
+            -type f \
+            -print -quit)
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "ERROR: settings.gradle.kts not found."
+            exit 1
+          fi
+
+          PROJECT_DIR=$(dirname "$PROJECT_DIR")
+
+          rm -rf project
+          cp -R "$PROJECT_DIR" project
+
+          echo "Project selected:"
+          pwd
+          find project -maxdepth 3 -type f | sort
+
+      - name: Verify source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          MAIN="project/app/src/main/java/com/dardasha/anonymous/MainActivity.kt"
+
+          test -f "$MAIN"
+
+          echo "Checking withStyle import..."
+          grep -n "import androidx.compose.ui.text.withStyle" "$MAIN"
+
+          echo "Checking verticalScroll import..."
+          grep -n "import androidx.compose.foundation.verticalScroll" "$MAIN"
+
+          echo "Checking owner UID..."
+          grep -n "wDMqt8jpP1gEJJtLuUMrTTaeU8q1" "$MAIN"
+
+          echo "SOURCE CHECK PASSED"
 
       - name: Build debug APK
         working-directory: project
@@ -98,7 +113,7 @@ jobs:
 
           test -s "$APK"
 
-          echo "APK successfully built:"
+          echo "APK FOUND:"
           ls -lh "$APK"
 
       - name: Upload APK
