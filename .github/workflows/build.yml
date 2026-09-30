@@ -11,104 +11,55 @@ permissions:
 
 jobs:
   build:
-    name: Build Dardasha Anonymous APK
+    name: Build Android APK
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
     steps:
-
-      # =========================================================
-      # 1. Checkout
-      # =========================================================
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # =========================================================
-      # 2. Java 17
-      # =========================================================
       - name: Setup Java 17
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
 
-      # =========================================================
-      # 3. Android SDK
-      # =========================================================
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
 
-      # =========================================================
-      # 4. Install Android SDK 36
-      # =========================================================
       - name: Install Android SDK 36
         shell: bash
         run: |
           set -euo pipefail
-
-          echo "================================"
-          echo "ANDROID SDK INFORMATION"
-          echo "================================"
-
-          sdkmanager --version || true
-
-          echo ""
-          echo "Accepting Android SDK licenses..."
-
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
 
-          echo ""
-          echo "Installing required Android SDK packages..."
-
-          sdkmanager \
-            "platform-tools" \
-            "platforms;android-36" \
-            "build-tools;36.0.0"
-
-          echo ""
-          echo "Android SDK installation completed."
-
-      # =========================================================
-      # 5. Find final Dardasha ZIP
-      # =========================================================
       - name: Find final Dardasha ZIP
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "================================"
-          echo "SEARCHING FOR DARDASHA ZIP"
-          echo "================================"
-
-          ZIP_FILE="$(find "$GITHUB_WORKSPACE" \
+          ZIP_FILE=$(find "$GITHUB_WORKSPACE" \
             -type f \
-            -name 'Dardasha-FINAL-FIXED-V3-UPDATED.zip' \
-            -not -path '*/.git/*' \
-            -print -quit)"
+            -name "Dardasha-FINAL-FIXED-V3-UPDATED.zip" \
+            -not -path "*/.git/*" \
+            -print -quit)
 
           if [ -z "$ZIP_FILE" ]; then
-            echo ""
-            echo "ERROR: Dardasha-FINAL-FIXED-V3-UPDATED.zip was not found."
-            echo ""
-            echo "ZIP files currently found:"
+            echo "ERROR: Dardasha-FINAL-FIXED-V3-UPDATED.zip not found."
+            echo "ZIP files found:"
             find "$GITHUB_WORKSPACE" \
               -type f \
-              -iname '*.zip' \
-              -not -path '*/.git/*' \
+              -iname "*.zip" \
+              -not -path "*/.git/*" \
               -print
-
             exit 1
           fi
 
-          echo ""
-          echo "ZIP FOUND:"
-          echo "$ZIP_FILE"
-
           echo "ZIP_FILE=$ZIP_FILE" >> "$GITHUB_ENV"
+          echo "Using ZIP: $ZIP_FILE"
 
-      # =========================================================
-      # 6. Extract Android project
-      # =========================================================
       - name: Extract Android project
         shell: bash
         run: |
@@ -119,339 +70,119 @@ jobs:
           rm -rf "$PROJECT_ROOT"
           mkdir -p "$PROJECT_ROOT"
 
-          echo "================================"
-          echo "EXTRACTING DARDASHA PROJECT"
-          echo "================================"
-
           unzip -q "$ZIP_FILE" -d "$PROJECT_ROOT"
 
-          SETTINGS_FILE="$(find "$PROJECT_ROOT" \
+          SETTINGS_FILE=$(find "$PROJECT_ROOT" \
             -type f \
-            \( \
-              -name 'settings.gradle.kts' \
-              -o \
-              -name 'settings.gradle' \
-            \) \
-            -print -quit)"
+            \( -name "settings.gradle.kts" -o -name "settings.gradle" \) \
+            -print -quit)
 
           if [ -z "$SETTINGS_FILE" ]; then
-            echo ""
-            echo "ERROR: settings.gradle or settings.gradle.kts was not found."
-            echo ""
-            echo "Extracted files:"
-            find "$PROJECT_ROOT" -maxdepth 4 -type f | head -200
+            echo "ERROR: settings.gradle(.kts) not found."
             exit 1
           fi
 
-          PROJECT_DIR="$(dirname "$SETTINGS_FILE")"
+          PROJECT_DIR=$(dirname "$SETTINGS_FILE")
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo ""
-          echo "ANDROID PROJECT:"
-          echo "$PROJECT_DIR"
+          test -f "$PROJECT_DIR/build.gradle.kts"
+          test -f "$PROJECT_DIR/app/build.gradle.kts"
+          test -f "$PROJECT_DIR/app/google-services.json"
+          test -f "$PROJECT_DIR/app/src/main/AndroidManifest.xml"
+          test -f "$PROJECT_DIR/app/src/main/java/com/dardasha/anonymous/MainActivity.kt"
 
-          echo ""
-          echo "Checking required project files..."
+          echo "Project structure OK."
+          echo "PROJECT_DIR=$PROJECT_DIR"
 
-          test -f "$PROJECT_DIR/build.gradle.kts" \
-            || { echo "ERROR: Root build.gradle.kts missing."; exit 1; }
-
-          test -f "$PROJECT_DIR/app/build.gradle.kts" \
-            || { echo "ERROR: app/build.gradle.kts missing."; exit 1; }
-
-          test -f "$PROJECT_DIR/app/google-services.json" \
-            || { echo "ERROR: google-services.json missing."; exit 1; }
-
-          test -f "$PROJECT_DIR/app/src/main/AndroidManifest.xml" \
-            || { echo "ERROR: AndroidManifest.xml missing."; exit 1; }
-
-          test -f "$PROJECT_DIR/app/src/main/java/com/dardasha/anonymous/MainActivity.kt" \
-            || { echo "ERROR: MainActivity.kt missing."; exit 1; }
-
-          echo ""
-          echo "Project structure check: OK"
-
-      # =========================================================
-      # 7. Gradle 8.13
-      # =========================================================
       - name: Setup Gradle 8.13
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.13"
 
-      # =========================================================
-      # 8. Verify Java / Gradle
-      # =========================================================
       - name: Verify Java and Gradle
-        shell: bash
         run: |
           set -euo pipefail
-
-          echo "================================"
-          echo "JAVA VERSION"
-          echo "================================"
-
           java -version
-
-          echo ""
-          echo "================================"
-          echo "GRADLE VERSION"
-          echo "================================"
-
           gradle --version
 
-      # =========================================================
-      # 9. Fix known source/dependency problems
-      # =========================================================
-      - name: Fix source and dependencies
+      - name: Prepare source
         shell: bash
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           set -euo pipefail
 
           MAIN="app/src/main/java/com/dardasha/anonymous/MainActivity.kt"
-          FILE="app/build.gradle.kts"
 
-          echo "================================"
-          echo "SOURCE PREPARATION"
-          echo "================================"
+          echo "Checking MainActivity.kt..."
 
-          test -f "$MAIN"
-          test -f "$FILE"
-
-          # -----------------------------------------------------
-          # Firebase Presence fix
-          # -----------------------------------------------------
-
-          echo ""
-          echo "Checking Firebase Presence..."
-
+          # Fix the known Firebase Presence syntax.
           sed -i \
             's/ref\.onDisconnect()\.child("online")\.setValue(false)/ref.child("online").onDisconnect().setValue(false)/g' \
             "$MAIN"
 
+          # Add verticalScroll import if it is used.
+          if grep -q "verticalScroll" "$MAIN"; then
+            if ! grep -q "^import androidx.compose.foundation.verticalScroll$" "$MAIN"; then
+              sed -i \
+                '/^package /a import androidx.compose.foundation.verticalScroll' \
+                "$MAIN"
+            fi
+          fi
+
+          # Add rememberScrollState import if it is used.
+          if grep -q "rememberScrollState" "$MAIN"; then
+            if ! grep -q "^import androidx.compose.foundation.rememberScrollState$" "$MAIN"; then
+              sed -i \
+                '/^package /a import androidx.compose.foundation.rememberScrollState' \
+                "$MAIN"
+            fi
+          fi
+
+          # Make sure the old invalid Firebase syntax is gone.
           if grep -q 'ref\.onDisconnect()\.child' "$MAIN"; then
-            echo ""
-            echo "ERROR:"
-            echo "Invalid Firebase onDisconnect().child() syntax still exists."
+            echo "ERROR: Invalid Firebase Presence syntax remains."
             exit 1
           fi
 
-          echo "Firebase Presence syntax: OK"
-
-          # -----------------------------------------------------
-          # Compose verticalScroll imports
-          # -----------------------------------------------------
-
-          echo ""
-          echo "Checking Compose scroll imports..."
-
-          if grep -q 'verticalScroll' "$MAIN"; then
-
-            if ! grep -q '^import androidx\.compose\.foundation\.verticalScroll$' "$MAIN"; then
-
-              sed -i '/^package /a\
-\
-import androidx.compose.foundation.verticalScroll' "$MAIN"
-
-              echo "Added verticalScroll import."
-
-            else
-              echo "verticalScroll import already exists."
-            fi
-
-          else
-            echo "No verticalScroll reference found."
+          # Verify the scroll imports.
+          if grep -q "verticalScroll" "$MAIN"; then
+            grep -q "^import androidx.compose.foundation.verticalScroll$" "$MAIN"
           fi
 
-          # -----------------------------------------------------
-          # Compose rememberScrollState import
-          # -----------------------------------------------------
-
-          if grep -q 'rememberScrollState' "$MAIN"; then
-
-            if ! grep -q '^import androidx\.compose\.foundation\.rememberScrollState$' "$MAIN"; then
-
-              sed -i '/^package /a\
-\
-import androidx.compose.foundation.rememberScrollState' "$MAIN"
-
-              echo "Added rememberScrollState import."
-
-            else
-              echo "rememberScrollState import already exists."
-            fi
-
-          else
-            echo "No rememberScrollState reference found."
+          if grep -q "rememberScrollState" "$MAIN"; then
+            grep -q "^import androidx.compose.foundation.rememberScrollState$" "$MAIN"
           fi
 
-          # -----------------------------------------------------
-          # Android compile SDK
-          # -----------------------------------------------------
+          echo "Source preparation completed."
 
-          echo ""
-          echo "Checking compileSdk..."
-
-          sed -i -E \
-            's/compileSdk[[:space:]]*=[[:space:]]*[0-9]+/compileSdk = 36/g' \
-            "$FILE"
-
-          echo "compileSdk forced to 36."
-
-          # -----------------------------------------------------
-          # Compose BOM
-          # -----------------------------------------------------
-
-          sed -i -E \
-            's/(androidx\.compose:compose-bom:)[0-9]+\.[0-9]+\.[0-9]+/\12026.06.01/g' \
-            "$FILE"
-
-          # -----------------------------------------------------
-          # AndroidX Core
-          # -----------------------------------------------------
-
-          sed -i -E \
-            's/(androidx\.core:core-ktx:)[0-9]+\.[0-9]+\.[0-9]+/\11.18.0/g' \
-            "$FILE"
-
-          sed -i -E \
-            's/(androidx\.core:core:)[0-9]+\.[0-9]+\.[0-9]+/\11.18.0/g' \
-            "$FILE"
-
-          echo ""
-          echo "Android configuration prepared."
-
-          # -----------------------------------------------------
-          # Print important source information
-          # -----------------------------------------------------
-
-          echo ""
-          echo "================================"
-          echo "SCROLL REFERENCES"
-          echo "================================"
-
-          grep -nE \
-            'verticalScroll|rememberScrollState' \
-            "$MAIN" || true
-
-          echo ""
-          echo "================================"
-          echo "ANDROID CONFIGURATION"
-          echo "================================"
-
-          grep -nE \
-            'compileSdk|compose-bom|core-ktx|core:' \
-            "$FILE" || true
-
-      # =========================================================
-      # 10. Kotlin source pre-flight check
-      # =========================================================
-      - name: Kotlin source pre-flight check
-        shell: bash
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: |
-          set -euo pipefail
-
-          MAIN="app/src/main/java/com/dardasha/anonymous/MainActivity.kt"
-
-          echo "================================"
-          echo "KOTLIN PRE-FLIGHT CHECK"
-          echo "================================"
-
-          test -f "$MAIN"
-
-          # verticalScroll must have its import when used.
-          if grep -q 'verticalScroll' "$MAIN"; then
-            grep -q '^import androidx\.compose\.foundation\.verticalScroll$' "$MAIN" \
-              || {
-                echo "ERROR: verticalScroll is used but its import is missing."
-                exit 1
-              }
-          fi
-
-          # rememberScrollState must have its import when used.
-          if grep -q 'rememberScrollState' "$MAIN"; then
-            grep -q '^import androidx\.compose\.foundation\.rememberScrollState$' "$MAIN" \
-              || {
-                echo "ERROR: rememberScrollState is used but its import is missing."
-                exit 1
-              }
-          fi
-
-          # Old Firebase syntax must never return.
-          if grep -q 'ref\.onDisconnect()\.child' "$MAIN"; then
-            echo "ERROR: Invalid Firebase Presence syntax detected."
-            exit 1
-          fi
-
-          echo ""
-          echo "Kotlin source pre-flight: PASSED"
-
-      # =========================================================
-      # 11. Clean
-      # =========================================================
-      - name: Clean project
-        shell: bash
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: |
-          set -euo pipefail
-
-          echo "================================"
-          echo "CLEANING PROJECT"
-          echo "================================"
-
-          gradle --no-daemon clean
-
-      # =========================================================
-      # 12. Build Debug APK
-      # =========================================================
       - name: Build Debug APK
         shell: bash
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           set -o pipefail
 
-          echo "================================"
-          echo "BUILDING DARDASHA APK"
-          echo "================================"
-
           gradle \
             --no-daemon \
+            clean \
             :app:assembleDebug \
             --console=plain \
             --stacktrace \
             2>&1 | tee "$RUNNER_TEMP/build.log"
 
-      # =========================================================
-      # 13. Verify APK
-      # =========================================================
       - name: Verify APK
         if: success()
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "================================"
-          echo "VERIFYING APK"
-          echo "================================"
-
-          APK="$(find "$PROJECT_DIR/app/build/outputs/apk" \
+          APK=$(find "$PROJECT_DIR/app/build/outputs/apk" \
             -type f \
-            -name '*.apk' \
-            -print -quit)"
+            -name "*.apk" \
+            -print -quit)
 
           if [ -z "$APK" ]; then
-            echo ""
             echo "ERROR: APK was not generated."
-
-            echo ""
-            echo "APK directory contents:"
-            find "$PROJECT_DIR/app/build/outputs" \
-              -type f \
-              -print 2>/dev/null || true
-
             exit 1
           fi
 
@@ -460,7 +191,6 @@ import androidx.compose.foundation.rememberScrollState' "$MAIN"
           cp "$APK" \
             "$GITHUB_WORKSPACE/release/dardasha-anonymous-debug.apk"
 
-          echo ""
           echo "================================"
           echo "APK SUCCESSFULLY CREATED"
           echo "================================"
@@ -468,9 +198,6 @@ import androidx.compose.foundation.rememberScrollState' "$MAIN"
           ls -lh \
             "$GITHUB_WORKSPACE/release/dardasha-anonymous-debug.apk"
 
-      # =========================================================
-      # 14. Upload APK
-      # =========================================================
       - name: Upload APK
         if: success()
         uses: actions/upload-artifact@v4
