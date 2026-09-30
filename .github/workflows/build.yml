@@ -17,23 +17,18 @@ jobs:
 
     steps:
 
-      # 1) تحميل ملفات المستودع
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2) إعداد Java 17
       - name: Setup Java 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: '17'
-          cache: gradle
+          java-version: "17"
 
-      # 3) إعداد Android SDK
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      # 4) تثبيت Android SDK 36
       - name: Install Android SDK 36
         shell: bash
         run: |
@@ -46,163 +41,217 @@ jobs:
             "platforms;android-36" \
             "build-tools;36.0.0"
 
-      # 5) التأكد من وجود النسخة النهائية
-      - name: Find final project ZIP
+      - name: Find final Dardasha ZIP
         shell: bash
         run: |
           set -e
 
-          echo "Searching for Dardasha-FINAL-WORK-READY-V2.zip..."
-
-          ZIP_FILE="$(find . -maxdepth 3 -type f \
-            -name 'Dardasha-FINAL-WORK-READY-V2.zip' \
+          ZIP_FILE="$(find "$GITHUB_WORKSPACE" \
+            -type f \
+            -name 'Dardasha-FINAL-FIXED-V3-UPDATED.zip' \
+            -not -path '*/.git/*' \
             -print -quit)"
 
           if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: Dardasha-FINAL-WORK-READY-V2.zip was not found."
-            echo "Files in repository:"
-            find . -maxdepth 3 -type f -print
+            echo "ERROR: Dardasha-FINAL-FIXED-V3-UPDATED.zip was not found."
+
+            echo ""
+            echo "ZIP files in repository:"
+            find "$GITHUB_WORKSPACE" \
+              -type f \
+              -iname '*.zip' \
+              -not -path '*/.git/*' \
+              -print
+
             exit 1
           fi
 
-          echo "Found:"
+          echo "Using:"
           echo "$ZIP_FILE"
 
           echo "ZIP_FILE=$ZIP_FILE" >> "$GITHUB_ENV"
 
-      # 6) فك المشروع في مجلد منفصل
       - name: Extract Android project
         shell: bash
         run: |
           set -e
 
-          rm -rf "$GITHUB_WORKSPACE/dardasha-build"
-          mkdir -p "$GITHUB_WORKSPACE/dardasha-build"
+          PROJECT_ROOT="$RUNNER_TEMP/dardasha-project"
 
-          unzip -q "$ZIP_FILE" -d "$GITHUB_WORKSPACE/dardasha-build"
+          rm -rf "$PROJECT_ROOT"
+          mkdir -p "$PROJECT_ROOT"
 
-          echo "Extracted project files:"
-          find "$GITHUB_WORKSPACE/dardasha-build" \
-            -maxdepth 4 \
+          unzip -q "$ZIP_FILE" -d "$PROJECT_ROOT"
+
+          SETTINGS_FILE="$(find "$PROJECT_ROOT" \
             -type f \
-            \( -name 'settings.gradle.kts' \
-            -o -name 'build.gradle.kts' \
-            -o -name 'AndroidManifest.xml' \
-            -o -name 'MainActivity.kt' \
-            -o -name 'google-services.json' \) \
-            -print
+            \( \
+              -name 'settings.gradle.kts' \
+              -o \
+              -name 'settings.gradle' \
+            \) \
+            -print -quit)"
 
-      # 7) تحديد مجلد مشروع Android الحقيقي
-      - name: Locate Android project
-        shell: bash
-        run: |
-          set -e
-
-          PROJECT_DIR="$(find "$GITHUB_WORKSPACE/dardasha-build" \
-            -type f \
-            -name 'settings.gradle.kts' \
-            -print -quit | xargs -r dirname)"
-
-          if [ -z "$PROJECT_DIR" ]; then
-            echo "ERROR: settings.gradle.kts was not found."
+          if [ -z "$SETTINGS_FILE" ]; then
+            echo "ERROR: settings.gradle(.kts) not found."
             exit 1
           fi
 
-          echo "Android project:"
-          echo "$PROJECT_DIR"
-
-          if [ ! -f "$PROJECT_DIR/build.gradle.kts" ]; then
-            echo "ERROR: root build.gradle.kts is missing."
-            exit 1
-          fi
-
-          if [ ! -f "$PROJECT_DIR/app/build.gradle.kts" ]; then
-            echo "ERROR: app/build.gradle.kts is missing."
-            exit 1
-          fi
-
-          if [ ! -f "$PROJECT_DIR/app/google-services.json" ]; then
-            echo "ERROR: app/google-services.json is missing."
-            exit 1
-          fi
-
-          if [ ! -f "$PROJECT_DIR/app/src/main/AndroidManifest.xml" ]; then
-            echo "ERROR: AndroidManifest.xml is missing."
-            exit 1
-          fi
+          PROJECT_DIR="$(dirname "$SETTINGS_FILE")"
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-      # 8) إعداد Gradle 8.13
+          echo "================================"
+          echo "ANDROID PROJECT"
+          echo "$PROJECT_DIR"
+          echo "================================"
+
+          test -f "$PROJECT_DIR/build.gradle.kts"
+          test -f "$PROJECT_DIR/app/build.gradle.kts"
+          test -f "$PROJECT_DIR/app/google-services.json"
+          test -f "$PROJECT_DIR/app/src/main/AndroidManifest.xml"
+
       - name: Setup Gradle 8.13
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.13'
+          gradle-version: "8.13"
 
-      # 9) التحقق من Java وGradle
-      - name: Verify build tools
+      - name: Verify Gradle
+        run: |
+          set -e
+          gradle --version
+
+      - name: Fix source and dependencies
         shell: bash
+        working-directory: ${{ env.PROJECT_DIR }}
         run: |
           set -e
 
-          echo "Java:"
-          java -version
+          MAIN="app/src/main/java/com/dardasha/anonymous/MainActivity.kt"
+          FILE="app/build.gradle.kts"
+
+          echo "================================"
+          echo "FIXING SOURCE"
+          echo "================================"
+
+          test -f "$MAIN"
+          test -f "$FILE"
+
+          # Fix known Firebase Presence compilation error.
+          sed -i \
+            's/ref\.onDisconnect()\.child("online")\.setValue(false)/ref.child("online").onDisconnect().setValue(false)/g' \
+            "$MAIN"
+
+          if grep -q 'ref\.onDisconnect()\.child' "$MAIN"; then
+            echo "ERROR: Invalid onDisconnect().child() still exists."
+            exit 1
+          fi
+
+          echo "Presence source check: OK"
 
           echo ""
-          echo "Gradle:"
-          gradle --version
+          echo "================================"
+          echo "FIXING ANDROID CONFIGURATION"
+          echo "================================"
 
-          echo ""
-          echo "Android SDK:"
-          sdkmanager --list_installed | head -100
+          # Keep project on API 36.
+          sed -i -E \
+            's/compileSdk[[:space:]]*=[[:space:]]*[0-9]+/compileSdk = 36/g' \
+            "$FILE"
 
-      # 10) تنظيف أي ملفات بناء قديمة
-      - name: Clean project
+          # Compose BOM compatible with compileSdk 36.
+          sed -i -E \
+            's/(androidx\.compose:compose-bom:)[0-9]+\.[0-9]+\.[0-9]+/\12026.06.01/g' \
+            "$FILE"
+
+          # Core compatible with compileSdk 36.
+          sed -i -E \
+            's/(androidx\.core:core-ktx:)[0-9]+\.[0-9]+\.[0-9]+/\11.18.0/g' \
+            "$FILE"
+
+          sed -i -E \
+            's/(androidx\.core:core:)[0-9]+\.[0-9]+\.[0-9]+/\11.18.0/g' \
+            "$FILE"
+
+          # Prevent transitive dependencies from upgrading
+          # Core or Compose beyond the compatible versions.
+          cat >> "$FILE" <<'EOF'
+
+          configurations.configureEach {
+              resolutionStrategy.eachDependency {
+                  if (requested.group == "androidx.core" &&
+                      (requested.name == "core" ||
+                       requested.name == "core-ktx")) {
+                      useVersion("1.18.0")
+                  }
+
+                  if (requested.group == "androidx.compose.animation" ||
+                      requested.group == "androidx.compose.foundation" ||
+                      requested.group == "androidx.compose.runtime" ||
+                      requested.group == "androidx.compose.ui") {
+                      useVersion("1.11.4")
+                  }
+              }
+          }
+          EOF
+
+          echo "Android configuration:"
+          grep -nE \
+            'compileSdk|compose-bom|androidx.core|resolutionStrategy' \
+            "$FILE" || true
+
+      - name: Clean
         shell: bash
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           set -e
           gradle --no-daemon clean
 
-      # 11) بناء APK Debug
       - name: Build Debug APK
         shell: bash
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
-          set -e
+          set -o pipefail
 
           gradle \
             --no-daemon \
-            --stacktrace \
-            --info \
-            assembleDebug
+            :app:assembleDebug \
+            --console=plain \
+            2>&1 | tee "$RUNNER_TEMP/build.log"
 
-      # 12) التأكد أن APK تم إنتاجه
       - name: Verify APK
+        if: success()
         shell: bash
         run: |
           set -e
 
-          APK="$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
+          APK="$(find "$PROJECT_DIR/app/build/outputs/apk" \
+            -type f \
+            -name '*.apk' \
+            -print -quit)"
 
-          if [ ! -f "$APK" ]; then
+          if [ -z "$APK" ]; then
             echo "ERROR: APK was not generated."
-            echo ""
-            echo "Available build outputs:"
-            find "$PROJECT_DIR/app/build/outputs" \
-              -type f \
-              -print 2>/dev/null || true
             exit 1
           fi
 
-          echo "APK successfully created:"
-          ls -lh "$APK"
+          mkdir -p "$GITHUB_WORKSPACE/release"
 
-      # 13) رفع APK كملف يمكن تنزيله من GitHub Actions
+          cp "$APK" \
+            "$GITHUB_WORKSPACE/release/dardasha-anonymous-debug.apk"
+
+          echo "================================"
+          echo "APK SUCCESSFULLY CREATED"
+          echo "================================"
+
+          ls -lh \
+            "$GITHUB_WORKSPACE/release/dardasha-anonymous-debug.apk"
+
       - name: Upload APK
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: Dardasha-Anonymous-APK
-          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk
+          path: release/dardasha-anonymous-debug.apk
           if-no-files-found: error
           retention-days: 14
