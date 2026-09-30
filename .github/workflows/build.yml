@@ -15,7 +15,8 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - name: Checkout
+
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Setup Java 17
@@ -30,72 +31,145 @@ jobs:
           gradle-version: '8.13'
           cache-disabled: true
 
-      - name: Find and extract Dardasha V3
+      - name: Select and extract project
         shell: bash
         run: |
           set -euo pipefail
 
-          ZIP_FILE="./Dardasha-FINAL-CLEAN-SOURCE-V3.zip"
-
-          echo "Checking for V3:"
-          echo "$ZIP_FILE"
-
-          if [ ! -f "$ZIP_FILE" ]; then
-            echo "ERROR: Dardasha-FINAL-CLEAN-SOURCE-V3.zip was not found."
-            echo "ZIP files in repository:"
-            find . -type f -iname "*.zip" -print
-            exit 1
-          fi
+          echo "======================================"
+          echo "Searching for Dardasha project ZIP"
+          echo "======================================"
 
           rm -rf /tmp/dardasha
           mkdir -p /tmp/dardasha
 
+          FIX_ZIP="./Dardasha-STORAGE-GOOGLE-FIX.zip"
+
+          if [ -f "$FIX_ZIP" ]; then
+            ZIP_FILE="$FIX_ZIP"
+            echo "Using newest fixed project:"
+            echo "$ZIP_FILE"
+          else
+            ZIP_FILE="$(find . -maxdepth 2 -type f -iname '*.zip' \
+              ! -name 'Dardasha-FINAL-CLEAN-SOURCE-V3.zip' \
+              | sort | head -n 1)"
+
+            if [ -z "$ZIP_FILE" ]; then
+              echo "ERROR: No Dardasha ZIP was found."
+              echo ""
+              echo "ZIP files found:"
+              find . -type f -iname '*.zip' -print
+              exit 1
+            fi
+
+            echo "Using fallback ZIP:"
+            echo "$ZIP_FILE"
+          fi
+
+          echo ""
+          echo "Extracting:"
+          echo "$ZIP_FILE"
+
           unzip -q "$ZIP_FILE" -d /tmp/dardasha
 
-          PROJECT_DIR=$(find /tmp/dardasha \
-            -name "settings.gradle.kts" \
-            -type f \
-            -print -quit)
+          echo ""
+          echo "Searching for Gradle project..."
 
-          if [ -z "$PROJECT_DIR" ]; then
-            echo "ERROR: settings.gradle.kts not found."
+          SETTINGS_FILE="$(find /tmp/dardasha \
+            -type f \
+            -name 'settings.gradle.kts' \
+            -print -quit)"
+
+          if [ -z "$SETTINGS_FILE" ]; then
+            echo "ERROR: settings.gradle.kts was not found."
+            echo ""
+            echo "Extracted files:"
+            find /tmp/dardasha -maxdepth 5 -type f | sort
             exit 1
           fi
 
-          PROJECT_DIR=$(dirname "$PROJECT_DIR")
+          PROJECT_DIR="$(dirname "$SETTINGS_FILE")"
+
+          echo ""
+          echo "Project directory:"
+          echo "$PROJECT_DIR"
 
           rm -rf project
-          cp -R "$PROJECT_DIR" project
+          mkdir -p project
 
-          echo "Project selected:"
-          pwd
-          find project -maxdepth 3 -type f | sort
+          cp -R "$PROJECT_DIR"/. project/
 
-      - name: Verify source
+          echo ""
+          echo "Project successfully selected."
+
+          echo ""
+          echo "Project structure:"
+          find project -maxdepth 4 -type f | sort
+
+      - name: Verify project files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Checking required files..."
+
+          test -f project/settings.gradle.kts
+          test -f project/build.gradle.kts
+          test -f project/app/build.gradle.kts
+
+          MAIN="project/app/src/main/java/com/dardasha/anonymous/MainActivity.kt"
+
+          test -f "$MAIN"
+
+          echo "Required project files found."
+
+      - name: Verify Dardasha source
         shell: bash
         run: |
           set -euo pipefail
 
           MAIN="project/app/src/main/java/com/dardasha/anonymous/MainActivity.kt"
 
-          test -f "$MAIN"
+          echo "Checking Compose imports..."
 
-          echo "Checking withStyle import..."
-          grep -n "import androidx.compose.ui.text.withStyle" "$MAIN"
+          grep -q \
+            'import androidx.compose.ui.text.withStyle' \
+            "$MAIN"
 
-          echo "Checking verticalScroll import..."
-          grep -n "import androidx.compose.foundation.verticalScroll" "$MAIN"
+          grep -q \
+            'import androidx.compose.foundation.verticalScroll' \
+            "$MAIN"
 
+          echo "Compose imports OK."
+
+          echo ""
           echo "Checking owner UID..."
-          grep -n "wDMqt8jpP1gEJJtLuUMrTTaeU8q1" "$MAIN"
 
-          echo "SOURCE CHECK PASSED"
+          grep -q \
+            'wDMqt8jpP1gEJJtLuUMrTTaeU8q1' \
+            "$MAIN"
+
+          echo "Owner UID OK."
+
+          echo ""
+          echo "Checking source for obvious invalid character replacement..."
+
+          if grep -q ".replace('ـ', '')" "$MAIN"; then
+            echo "ERROR: Invalid Kotlin replacement found."
+            exit 1
+          fi
+
+          echo "Source verification passed."
 
       - name: Build debug APK
         working-directory: project
         shell: bash
         run: |
           set -euo pipefail
+
+          echo "======================================"
+          echo "BUILDING DARDASHA APK"
+          echo "======================================"
 
           gradle \
             --no-daemon \
@@ -111,9 +185,15 @@ jobs:
 
           APK="project/app/build/outputs/apk/debug/app-debug.apk"
 
-          test -s "$APK"
+          if [ ! -s "$APK" ]; then
+            echo "ERROR: APK was not created."
+            exit 1
+          fi
 
-          echo "APK FOUND:"
+          echo "======================================"
+          echo "APK BUILD SUCCESSFUL"
+          echo "======================================"
+
           ls -lh "$APK"
 
       - name: Upload APK
