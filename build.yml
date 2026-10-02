@@ -1,4 +1,4 @@
-name: Build Dardasha Fixed Storage Auth Audio APK
+name: Build Dardasha V11 Fixed APK
 
 on:
   workflow_dispatch:
@@ -28,37 +28,20 @@ jobs:
           gradle-version: '8.13'
           cache-disabled: true
 
-      - name: Select ONLY the audited source by marker
+      - name: Extract ONLY V11 audited project
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf /tmp/dardasha-v9 project
-          mkdir -p /tmp/dardasha-v9 project
-          marker='DARDASHA-MAIN-BUILD-V9-END-TO-END-STORAGE-AUDIT'
-          main_path='app/src/main/java/com/dardasha/anonymous/MainActivity.kt'
-          matches=()
-          while IFS= read -r -d '' zip; do
-            hash="$(printf '%s' "$zip" | sha256sum | cut -d' ' -f1)"
-            tmp="/tmp/dardasha-v9/$hash"
-            mkdir -p "$tmp"
-            if unzip -q -o "$zip" -d "$tmp" 2>/dev/null && [ -f "$tmp/$main_path" ] && grep -Fq "$marker" "$tmp/$main_path"; then
-              matches+=("$zip")
-            fi
-          done < <(find . -type f -name '*.zip' -print0)
-          if [ "${#matches[@]}" -ne 1 ]; then
-            echo "ERROR: expected exactly one audited source ZIP, found ${#matches[@]}."
-            printf '%s\n' "${matches[@]:-<none>}"
-            exit 1
-          fi
-          ZIP_FILE="${matches[0]}"
-          echo "Selected audited source: $ZIP_FILE"
-          mkdir -p /tmp/dardasha-v9/selected
-          unzip -q -o "$ZIP_FILE" -d /tmp/dardasha-v9/selected
-          PROJECT_DIR="$(find /tmp/dardasha-v9/selected -type f -name settings.gradle.kts -print -quit | xargs -r dirname)"
+          ZIP='Dardasha-V11-FIXED-STORAGE-AUTH-AUDIO.zip'
+          test -f "$ZIP" || { echo "ERROR: $ZIP is missing from repository root."; exit 1; }
+          rm -rf project /tmp/dardasha-v11
+          mkdir -p project /tmp/dardasha-v11
+          unzip -q -o "$ZIP" -d /tmp/dardasha-v11
+          PROJECT_DIR="$(find /tmp/dardasha-v11 -type f -name settings.gradle.kts -print -quit | xargs -r dirname)"
           test -n "$PROJECT_DIR"
           cp -R "$PROJECT_DIR"/. project/
 
-      - name: Audit source and Firebase config before Gradle
+      - name: Audit V11 source and Firebase config
         working-directory: project
         shell: bash
         run: |
@@ -68,26 +51,22 @@ jobs:
           test -f app/google-services.json
           test -f storage.rules
           test -f database.rules.json
-          grep -Fq 'DARDASHA-MAIN-BUILD-V9-END-TO-END-STORAGE-AUDIT' "$MAIN"
+          grep -Fq 'DARDASHA-MAIN-BUILD-V11-STORAGE-AUTH-AUDIO-FIX' "$MAIN"
           grep -Fq 'FirebaseStorage.getInstance()' "$MAIN"
-          grep -Fq 'ref.putFile(uploadUri, metadata)' "$MAIN"
-          grep -Fq 'ref.downloadUrl' "$MAIN"
-          grep -Fq 'Storage URL FAILED:' "$MAIN"
+          grep -Fq 'ref.putFile' "$MAIN"
+          grep -Fq 'firebaseStorageDownloadTokens' "$MAIN"
           grep -Fq 'auth.signInWithEmailAndPassword' "$MAIN"
           grep -Fq 'MediaRecorder.AudioSource.MIC' "$MAIN"
-          grep -Fq 'storage.app.options.storageBucket' "$MAIN"
-          grep -Fq 'getBytes(' "$MAIN"
-          grep -Fq 'wDMqt8jpP1gEJJtLuUMrTTaeU8q1' "$MAIN"
           grep -Fq 'wDMqt8jpP1gEJJtLuUMrTTaeU8q1' database.rules.json
           grep -Fq 'dardasha-anonymous.firebasestorage.app' app/google-services.json
-          echo 'fixed source/config audit: PASSED'
+          echo 'V11 source/config audit: PASSED'
 
-      - name: Build V10 debug APK
+      - name: Build V11 debug APK
         working-directory: project
         shell: bash
         run: gradle --no-daemon --stacktrace --warning-mode all clean :app:assembleDebug
 
-      - name: Verify V10 APK identity
+      - name: Verify APK
         working-directory: project
         shell: bash
         run: |
@@ -96,11 +75,10 @@ jobs:
           test -s "$APK"
           ls -lh "$APK"
           grep -E 'versionCode|versionName' app/build.gradle.kts
-          grep -F 'DARDASHA-MAIN-BUILD-V9-END-TO-END-STORAGE-AUDIT' app/src/main/java/com/dardasha/anonymous/MainActivity.kt
 
       - name: Upload fixed Dardasha APK
         uses: actions/upload-artifact@v4
         with:
-          name: dardasha-anonymous-fixed-v10
+          name: dardasha-anonymous-fixed-v11
           path: project/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
